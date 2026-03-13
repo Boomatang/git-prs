@@ -75,25 +75,25 @@ const TeamArgs = struct {
 **Config Loader → GitHub Client:**
 ```zig
 const Config = struct {
-    mine_orgs: [][]const u8,           // orgs to check for personal PRs
-    team_members: std.StringHashMap([][]const u8),  // org -> member list
-    auth_token: []const u8,            // from gh auth token
-    authenticated_user: []const u8,    // from GitHub API /user
+    mine_orgs: [][]const u8,              // from JSON: mine.orgs
+    teams: std.StringHashMap([][]const u8),  // from JSON: team.<org> -> member list
+    auth_token: []const u8,               // from: gh auth token
+    authenticated_user: []const u8,       // from: GitHub API /user endpoint
 };
 ```
 
 **GitHub Client → Output Formatter:**
 ```zig
 const PullRequest = struct {
-    org: []const u8,
-    repo: []const u8,
-    number: u32,
-    title: []const u8,
-    url: []const u8,
-    author: []const u8,
-    created_at: i64,          // unix timestamp
-    last_comment_at: ?i64,    // null if no comments
-    unique_commenters: u32,
+    org: []const u8,          // from: repository.owner.login
+    repo: []const u8,         // from: repository.name
+    number: u32,              // from: number
+    title: []const u8,        // from: title
+    url: []const u8,          // from: url
+    author: []const u8,       // from: author.login
+    created_at: i64,          // from: createdAt (unix timestamp)
+    last_comment_at: ?i64,    // from: comments (null if no comments)
+    unique_commenters: u32,   // computed: count of unique comment authors
 };
 ```
 
@@ -116,7 +116,7 @@ git-prs mine [OPTIONS]
   --limit <n>                # Max PRs to show (default: 50)
 
 git-prs team [OPTIONS]
-  --org <name>               # Which org to check (required if multiple configured)
+  --org <name>               # Which org to check (auto-selected if only one configured)
   --member <username>        # Filter to specific team member (optional)
 ```
 
@@ -218,19 +218,28 @@ charlie  my-co/core#234    Refactor auth module...    5d     0     5d
 - Otherwise default to 80 columns
 - No terminal ioctl queries (keeps it simple)
 
-**Title truncation:**
-- Fixed column widths: AUTHOR (8), ORG/REPO#NUM (20), AGE (5), 👤 (3), LAST (5)
-- TITLE gets remaining width minus spacing
-- Truncation adds "..." at end if title exceeds available width
+**Column truncation:**
+All columns except TITLE have fixed widths. If content exceeds width, truncate with "...":
+
+| Column | Width | Overflow handling |
+|--------|-------|-------------------|
+| AUTHOR | 8 | Truncate to 5 + "..." |
+| ORG/REPO#NUM | 25 | Truncate org/repo portion, keep #NUM visible |
+| TITLE | flexible | Truncate to remaining width + "..." |
+| AGE | 5 | Never overflows (max "99mo") |
+| 👤 | 3 | Never overflows (max "99") |
+| LAST | 5 | Never overflows (max "99mo") |
 
 **Time formatting:**
+Uses elapsed duration (not calendar time). Thresholds:
+
 | Duration | Format |
 |----------|--------|
 | < 1 hour | "Xm" (e.g., "45m") |
 | 1-23 hours | "Xh" (e.g., "3h") |
 | 1-6 days | "Xd" (e.g., "3d") |
-| 1-4 weeks | "Xw" (e.g., "2w") |
-| > 4 weeks | "Xmo" (e.g., "2mo") |
+| 7-27 days | "Xw" (e.g., "2w" = 14 days) |
+| 28+ days | "Xmo" (e.g., "2mo" = 56-83 days, using 28-day "months") |
 
 **Sort order:**
 - Default sort by AGE descending (oldest PRs first — they need attention)
@@ -248,10 +257,12 @@ charlie  my-co/core#234    Refactor auth module...    5d     0     5d
 | `gh auth token` fails | Error: "Not authenticated. Run `gh auth login` first" |
 | Config file missing | Error: "Config not found. Create ~/.config/git-prs/config.json" with example |
 | Config file invalid JSON | Error: "Invalid config: {parse error details}" |
+| `git-prs team` without --org (one team configured) | Auto-selects the single configured team (no error) |
 | `git-prs team` without --org (multiple teams configured) | Error: "Multiple teams configured. Specify --org: my-company, other-org" |
 | `git-prs team --org X` where X not in config | Error: "No team configured for org 'X'" |
 | No teams configured | Error: "No teams configured in config file" |
 | Org not accessible | Warning per org, continue with others: "Warning: kubernetes: not authorized, skipping" |
+| GitHub /user endpoint fails | Error: "Failed to get authenticated user: {details}" (fatal) |
 | Network failure | Error: "Failed to reach GitHub API: {details}" |
 | No PRs found | Message: "No open PRs found" (exit 0, not an error) |
 
@@ -280,6 +291,10 @@ query($query: String!, $first: Int!, $after: String) {
         url
         createdAt
         author { login }
+        repository {
+          owner { login }
+          name
+        }
         comments(first: 100) {
           nodes {
             author { login }
@@ -291,6 +306,8 @@ query($query: String!, $first: Int!, $after: String) {
   }
 }
 ```
+
+**Known limitation:** Only the first 100 comments are fetched per PR. For PRs with >100 comments, the commenter count and "last comment" time may be inaccurate. This is acceptable for the Monday-morning review use case; highly active PRs are clearly getting attention.
 
 **Query string construction:**
 - For `mine`: `is:pr is:open author:@me org:{org}`
