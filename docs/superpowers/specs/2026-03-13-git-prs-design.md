@@ -52,6 +52,51 @@ The tool is designed for a "Monday morning" workflow — quickly scanning PR hea
 | GitHub Client | HTTP calls to GitHub GraphQL API |
 | Output Formatter | Render PR data as compact table |
 
+### Component Interfaces
+
+**CLI Parser → Config Loader:**
+```zig
+const Command = union(enum) {
+    mine: MineArgs,
+    team: TeamArgs,
+};
+
+const MineArgs = struct {
+    org_filter: ?[]const u8,  // --org value or null
+    limit: u32,               // --limit value, default 50
+};
+
+const TeamArgs = struct {
+    org: []const u8,          // --org value (required)
+    member_filter: ?[]const u8,  // --member value or null
+};
+```
+
+**Config Loader → GitHub Client:**
+```zig
+const Config = struct {
+    mine_orgs: [][]const u8,           // orgs to check for personal PRs
+    team_members: std.StringHashMap([][]const u8),  // org -> member list
+    auth_token: []const u8,            // from gh auth token
+    authenticated_user: []const u8,    // from GitHub API /user
+};
+```
+
+**GitHub Client → Output Formatter:**
+```zig
+const PullRequest = struct {
+    org: []const u8,
+    repo: []const u8,
+    number: u32,
+    title: []const u8,
+    url: []const u8,
+    author: []const u8,
+    created_at: i64,          // unix timestamp
+    last_comment_at: ?i64,    // null if no comments
+    unique_commenters: u32,
+};
+```
+
 ### Technology Choices
 
 - **Language**: Zig 0.15.2
@@ -120,6 +165,18 @@ git-prs team --org my-company --member alice
 
 No auth configuration in git-prs. Token is obtained by running `gh auth token`, which returns the token from the user's existing `gh` CLI authentication.
 
+The authenticated user's GitHub username is obtained by calling the GitHub API `/user` endpoint with the token. This is cached for the duration of the command.
+
+### Config Validation
+
+| Rule | Error Message |
+|------|---------------|
+| `mine.orgs` missing or empty | "Config error: mine.orgs must contain at least one org" |
+| `mine.orgs` contains empty string | "Config error: mine.orgs contains empty org name" |
+| `team.<org>` is empty array | "Config error: team.{org} has no members listed" |
+| Org name contains invalid chars | No validation; GitHub API will reject invalid orgs |
+| `team` section missing | Allowed; `git-prs team` will error with "No teams configured" |
+
 ## Output Format
 
 ### Personal view (`git-prs mine`)
@@ -152,7 +209,36 @@ charlie  my-co/core#234    Refactor auth module...    5d     0     5d
 | TITLE | PR title, truncated to fit terminal width |
 | AGE | Time since PR was opened |
 | 👤 | Number of different people who have commented |
-| LAST | Time since most recent comment |
+| LAST | Time since most recent comment (shows "-" if no comments) |
+
+### Output Formatting Details
+
+**Terminal width detection:**
+- Use `COLUMNS` environment variable if set
+- Otherwise default to 80 columns
+- No terminal ioctl queries (keeps it simple)
+
+**Title truncation:**
+- Fixed column widths: AUTHOR (8), ORG/REPO#NUM (20), AGE (5), 👤 (3), LAST (5)
+- TITLE gets remaining width minus spacing
+- Truncation adds "..." at end if title exceeds available width
+
+**Time formatting:**
+| Duration | Format |
+|----------|--------|
+| < 1 hour | "Xm" (e.g., "45m") |
+| 1-23 hours | "Xh" (e.g., "3h") |
+| 1-6 days | "Xd" (e.g., "3d") |
+| 1-4 weeks | "Xw" (e.g., "2w") |
+| > 4 weeks | "Xmo" (e.g., "2mo") |
+
+**Sort order:**
+- Default sort by AGE descending (oldest PRs first — they need attention)
+- Team view: secondary sort by AUTHOR (group same author together)
+
+**URL formatting:**
+- Print full GitHub URL (e.g., `https://github.com/org/repo/pull/123`)
+- Kitty and other modern terminals auto-detect URLs
 
 ## Error Handling
 
@@ -162,6 +248,9 @@ charlie  my-co/core#234    Refactor auth module...    5d     0     5d
 | `gh auth token` fails | Error: "Not authenticated. Run `gh auth login` first" |
 | Config file missing | Error: "Config not found. Create ~/.config/git-prs/config.json" with example |
 | Config file invalid JSON | Error: "Invalid config: {parse error details}" |
+| `git-prs team` without --org (multiple teams configured) | Error: "Multiple teams configured. Specify --org: my-company, other-org" |
+| `git-prs team --org X` where X not in config | Error: "No team configured for org 'X'" |
+| No teams configured | Error: "No teams configured in config file" |
 | Org not accessible | Warning per org, continue with others: "Warning: kubernetes: not authorized, skipping" |
 | Network failure | Error: "Failed to reach GitHub API: {details}" |
 | No PRs found | Message: "No open PRs found" (exit 0, not an error) |
@@ -175,20 +264,52 @@ charlie  my-co/core#234    Refactor auth module...    5d     0     5d
 
 ### GitHub GraphQL Query
 
-For each org, fetch open PRs with:
-- PR number, title, URL
-- Author username
-- Created timestamp
-- Updated timestamp
-- Comments: count of unique commenters, timestamp of most recent comment
+Use GitHub's GraphQL API to search for open PRs. Query structure:
+
+```graphql
+query($query: String!, $first: Int!, $after: String) {
+  search(query: $query, type: ISSUE, first: $first, after: $after) {
+    pageInfo {
+      hasNextPage
+      endCursor
+    }
+    nodes {
+      ... on PullRequest {
+        number
+        title
+        url
+        createdAt
+        author { login }
+        comments(first: 100) {
+          nodes {
+            author { login }
+            createdAt
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+**Query string construction:**
+- For `mine`: `is:pr is:open author:@me org:{org}`
+- For `team`: `is:pr is:open author:{member} org:{org}` (one query per member)
+
+### Pagination
+
+- Fetch up to `--limit` PRs (default 50)
+- Use cursor-based pagination (`after` parameter)
+- Page size: 50 items per request
+- If `--limit` exceeds results, stop when no more pages
 
 ### Derived Fields
 
 | Field | Calculation |
 |-------|-------------|
 | AGE | `now - created_at` |
-| 👤 (commenters) | Count of unique usernames in comments |
-| LAST | `now - most_recent_comment_at` |
+| 👤 (commenters) | Count of unique `author.login` values in comments (excluding PR author) |
+| LAST | `now - most_recent_comment.createdAt` (null if no comments, display as "-") |
 
 ## Future Considerations
 
