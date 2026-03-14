@@ -10,6 +10,19 @@ pub fn getTerminalWidth() u32 {
     return std.fmt.parseInt(u32, columns, 10) catch 80;
 }
 
+/// Calculate the maximum identifier width needed for a list of PRs
+fn calcMaxIdentifierWidth(prs: []const PullRequest) usize {
+    var max_width: usize = 12; // minimum "ORG/REPO#NUM" header width
+    var buf: [256]u8 = undefined;
+    for (prs) |pr| {
+        const id = std.fmt.bufPrint(&buf, "{s}/{s}#{d}", .{ pr.org, pr.repo, pr.number }) catch continue;
+        if (id.len > max_width) {
+            max_width = id.len;
+        }
+    }
+    return max_width;
+}
+
 /// Truncate string to max_len, adding "..." if truncated
 fn truncate(str: []const u8, max_len: usize, buffer: []u8) []const u8 {
     if (max_len < 3) {
@@ -27,45 +40,9 @@ fn truncate(str: []const u8, max_len: usize, buffer: []u8) []const u8 {
     return buffer[0..max_len];
 }
 
-/// Format org/repo#number with truncation if needed
-fn formatPRIdentifier(pr: PullRequest, max_len: usize, buffer: []u8) ![]const u8 {
-    var temp_buffer: [256]u8 = undefined;
-    const full = try std.fmt.bufPrint(&temp_buffer, "{s}/{s}#{d}", .{ pr.org, pr.repo, pr.number });
-
-    if (full.len <= max_len) {
-        @memcpy(buffer[0..full.len], full);
-        return buffer[0..full.len];
-    }
-
-    // Calculate space for number part - use temp_buffer for calculation
-    var number_buffer: [32]u8 = undefined;
-    const number_str = try std.fmt.bufPrint(&number_buffer, "#{d}", .{pr.number});
-
-    // Need room for at least "..." + number
-    if (max_len < number_str.len + 3) {
-        // Not enough space, just show truncated full string
-        return truncate(full, max_len, buffer);
-    }
-
-    const available_for_org_repo = max_len - number_str.len - 3; // -3 for "..."
-
-    if (available_for_org_repo < 1) {
-        // Not enough space, just show truncated number
-        return truncate(full, max_len, buffer);
-    }
-
-    // Truncate org/repo part
-    const org_repo = try std.fmt.bufPrint(&temp_buffer, "{s}/{s}", .{ pr.org, pr.repo });
-    const truncated_org_repo = truncate(org_repo, available_for_org_repo, buffer);
-
-    // Add "..." after truncated org/repo
-    @memcpy(buffer[truncated_org_repo.len .. truncated_org_repo.len + 3], "...");
-
-    // Combine truncated org/repo with number
-    const result_len = truncated_org_repo.len + 3 + number_str.len;
-    @memcpy(buffer[truncated_org_repo.len + 3 .. result_len], number_str);
-
-    return buffer[0..result_len];
+/// Format org/repo#number (no truncation)
+fn formatPRIdentifier(pr: PullRequest, buffer: []u8) ![]const u8 {
+    return try std.fmt.bufPrint(buffer, "{s}/{s}#{d}", .{ pr.org, pr.repo, pr.number });
 }
 
 /// Format a single PR row for mine view
@@ -74,9 +51,10 @@ fn formatMineRow(
     pr: PullRequest,
     current_time: i64,
     title_width: usize,
+    identifier_width: usize,
 ) !void {
-    var identifier_buffer: [25]u8 = undefined;
-    const identifier = try formatPRIdentifier(pr, 25, &identifier_buffer);
+    var identifier_buffer: [256]u8 = undefined;
+    const identifier = try formatPRIdentifier(pr, &identifier_buffer);
 
     var title_buffer: [1024]u8 = undefined;
     const title = truncate(pr.title, title_width, &title_buffer);
@@ -90,10 +68,16 @@ fn formatMineRow(
     else
         "-";
 
-    try writer.print("{s: <25}  ", .{identifier});
+    // Print identifier with dynamic padding
+    try writer.writeAll(identifier);
+    var i: usize = identifier.len;
+    while (i < identifier_width) : (i += 1) {
+        try writer.writeByte(' ');
+    }
+    try writer.writeAll("  ");
     // Print title with padding
     try writer.writeAll(title);
-    var i: usize = title.len;
+    i = title.len;
     while (i < title_width) : (i += 1) {
         try writer.writeByte(' ');
     }
@@ -110,12 +94,13 @@ fn formatTeamRow(
     pr: PullRequest,
     current_time: i64,
     title_width: usize,
+    identifier_width: usize,
 ) !void {
     var author_buffer: [8]u8 = undefined;
     const author = truncate(pr.author, 8, &author_buffer);
 
-    var identifier_buffer: [25]u8 = undefined;
-    const identifier = try formatPRIdentifier(pr, 25, &identifier_buffer);
+    var identifier_buffer: [256]u8 = undefined;
+    const identifier = try formatPRIdentifier(pr, &identifier_buffer);
 
     var title_buffer: [1024]u8 = undefined;
     const title = truncate(pr.title, title_width, &title_buffer);
@@ -129,10 +114,18 @@ fn formatTeamRow(
     else
         "-";
 
-    try writer.print("{s: <8}  {s: <25}  ", .{ author, identifier });
+    // Print author with fixed padding
+    try writer.print("{s: <8}  ", .{author});
+    // Print identifier with dynamic padding
+    try writer.writeAll(identifier);
+    var i: usize = identifier.len;
+    while (i < identifier_width) : (i += 1) {
+        try writer.writeByte(' ');
+    }
+    try writer.writeAll("  ");
     // Print title with padding
     try writer.writeAll(title);
-    var i: usize = title.len;
+    i = title.len;
     while (i < title_width) : (i += 1) {
         try writer.writeByte(' ');
     }
@@ -143,16 +136,16 @@ fn formatTeamRow(
     });
 }
 
-/// Sort PRs by age descending (oldest first)
+/// Sort PRs by age descending (newest first)
 fn sortByAge(_: void, a: PullRequest, b: PullRequest) bool {
-    return a.created_at < b.created_at;
+    return a.created_at > b.created_at;
 }
 
 /// Sort PRs by author then age
 fn sortByAuthorThenAge(_: void, a: PullRequest, b: PullRequest) bool {
     const author_cmp = std.mem.order(u8, a.author, b.author);
     if (author_cmp == .eq) {
-        return a.created_at < b.created_at;
+        return a.created_at > b.created_at;
     }
     return author_cmp == .lt;
 }
@@ -174,30 +167,39 @@ pub fn formatMineOutput(
     defer allocator.free(sorted_prs);
     std.mem.sort(PullRequest, sorted_prs, {}, sortByAge);
 
+    // Calculate identifier width dynamically based on content
+    const identifier_width = calcMaxIdentifierWidth(sorted_prs);
+
     // Calculate title width
     const terminal_width = getTerminalWidth();
-    // Fixed columns: ORG/REPO#NUM(25) + AGE(5) + 👤(3) + LAST(5) + spaces(8) = 46
-    const fixed_width: u32 = 46;
+    // Fixed columns: AGE(5) + 👤(3) + LAST(5) + spaces(8) = 21, plus dynamic identifier
+    const fixed_width: usize = 21 + identifier_width;
     const title_width = if (terminal_width > fixed_width) terminal_width - fixed_width else 20;
 
-    // Print header
-    try writer.print("ORG/REPO#NUM             TITLE", .{});
-    var i: usize = 0;
-    while (i < title_width - 5) : (i += 1) {
+    // Print header with dynamic identifier column width
+    try writer.writeAll("ORG/REPO#NUM");
+    var i: usize = 12; // "ORG/REPO#NUM" is 12 chars
+    while (i < identifier_width) : (i += 1) {
         try writer.writeByte(' ');
     }
-    try writer.print("  AGE    👤    LAST\n", .{});
+    try writer.writeAll("  TITLE");
+    i = 5; // "TITLE" is 5 chars
+    while (i < title_width) : (i += 1) {
+        try writer.writeByte(' ');
+    }
+    try writer.print("  AGE    \xf0\x9f\x91\xa4    LAST\n", .{});
 
-    // Print separator
+    // Print separator (use total row width)
+    const total_width = identifier_width + 2 + title_width + 2 + 5 + 4 + 3 + 4 + 5;
     i = 0;
-    while (i < terminal_width) : (i += 1) {
-        try writer.writeAll("─");
+    while (i < total_width) : (i += 1) {
+        try writer.writeAll("\xe2\x94\x80");
     }
     try writer.print("\n", .{});
 
     // Print rows
     for (sorted_prs) |pr| {
-        try formatMineRow(writer, pr, current_time, title_width);
+        try formatMineRow(writer, pr, current_time, title_width, identifier_width);
     }
 }
 
@@ -218,30 +220,39 @@ pub fn formatTeamOutput(
     defer allocator.free(sorted_prs);
     std.mem.sort(PullRequest, sorted_prs, {}, sortByAuthorThenAge);
 
+    // Calculate identifier width dynamically based on content
+    const identifier_width = calcMaxIdentifierWidth(sorted_prs);
+
     // Calculate title width
     const terminal_width = getTerminalWidth();
-    // Fixed columns: AUTHOR(8) + ORG/REPO#NUM(25) + AGE(5) + 👤(3) + LAST(5) + spaces(10) = 56
-    const fixed_width: u32 = 56;
+    // Fixed columns: AUTHOR(8) + AGE(5) + 👤(3) + LAST(5) + spaces(10) = 31, plus dynamic identifier
+    const fixed_width: usize = 31 + identifier_width;
     const title_width = if (terminal_width > fixed_width) terminal_width - fixed_width else 20;
 
-    // Print header
-    try writer.print("AUTHOR    ORG/REPO#NUM             TITLE", .{});
-    var i: usize = 0;
-    while (i < title_width - 5) : (i += 1) {
+    // Print header with dynamic identifier column width
+    try writer.writeAll("AUTHOR    ORG/REPO#NUM");
+    var i: usize = 12; // "ORG/REPO#NUM" is 12 chars
+    while (i < identifier_width) : (i += 1) {
         try writer.writeByte(' ');
     }
-    try writer.print("  AGE    👤    LAST\n", .{});
+    try writer.writeAll("  TITLE");
+    i = 5; // "TITLE" is 5 chars
+    while (i < title_width) : (i += 1) {
+        try writer.writeByte(' ');
+    }
+    try writer.print("  AGE    \xf0\x9f\x91\xa4    LAST\n", .{});
 
-    // Print separator
+    // Print separator (use total row width)
+    const total_width = 8 + 2 + identifier_width + 2 + title_width + 2 + 5 + 4 + 3 + 4 + 5;
     i = 0;
-    while (i < terminal_width) : (i += 1) {
-        try writer.writeAll("─");
+    while (i < total_width) : (i += 1) {
+        try writer.writeAll("\xe2\x94\x80");
     }
     try writer.print("\n", .{});
 
     // Print rows
     for (sorted_prs) |pr| {
-        try formatTeamRow(writer, pr, current_time, title_width);
+        try formatTeamRow(writer, pr, current_time, title_width, identifier_width);
     }
 }
 
@@ -278,7 +289,7 @@ test "getTerminalWidth - default when COLUMNS not set" {
     try std.testing.expect(width >= 80);
 }
 
-test "sortByAge - sorts oldest first" {
+test "sortByAge - sorts newest first" {
     var prs = [_]PullRequest{
         .{
             .org = "org1",
@@ -317,9 +328,9 @@ test "sortByAge - sorts oldest first" {
 
     std.mem.sort(PullRequest, &prs, {}, sortByAge);
 
-    try std.testing.expectEqual(@as(i64, 500), prs[0].created_at);
+    try std.testing.expectEqual(@as(i64, 1500), prs[0].created_at);
     try std.testing.expectEqual(@as(i64, 1000), prs[1].created_at);
-    try std.testing.expectEqual(@as(i64, 1500), prs[2].created_at);
+    try std.testing.expectEqual(@as(i64, 500), prs[2].created_at);
 }
 
 test "sortByAuthorThenAge - sorts by author then age" {
@@ -364,11 +375,11 @@ test "sortByAuthorThenAge - sorts by author then age" {
     try std.testing.expectEqualStrings("alice", prs[0].author);
     try std.testing.expectEqualStrings("bob", prs[1].author);
     try std.testing.expectEqualStrings("bob", prs[2].author);
-    try std.testing.expectEqual(@as(i64, 800), prs[1].created_at);
-    try std.testing.expectEqual(@as(i64, 1000), prs[2].created_at);
+    try std.testing.expectEqual(@as(i64, 1000), prs[1].created_at);
+    try std.testing.expectEqual(@as(i64, 800), prs[2].created_at);
 }
 
-test "formatPRIdentifier - no truncation" {
+test "formatPRIdentifier - short identifier" {
     const pr = PullRequest{
         .org = "k8s",
         .repo = "kube",
@@ -381,12 +392,12 @@ test "formatPRIdentifier - no truncation" {
         .unique_commenters = 0,
     };
 
-    var buffer: [25]u8 = undefined;
-    const result = try formatPRIdentifier(pr, 25, &buffer);
+    var buffer: [256]u8 = undefined;
+    const result = try formatPRIdentifier(pr, &buffer);
     try std.testing.expectEqualStrings("k8s/kube#1234", result);
 }
 
-test "formatPRIdentifier - with truncation" {
+test "formatPRIdentifier - long identifier not truncated" {
     const pr = PullRequest{
         .org = "very-long-organization",
         .repo = "very-long-repository",
@@ -399,13 +410,62 @@ test "formatPRIdentifier - with truncation" {
         .unique_commenters = 0,
     };
 
-    var buffer: [25]u8 = undefined;
-    const result = try formatPRIdentifier(pr, 25, &buffer);
+    var buffer: [256]u8 = undefined;
+    const result = try formatPRIdentifier(pr, &buffer);
 
-    // Should end with the number
-    try std.testing.expect(std.mem.endsWith(u8, result, "#12345"));
-    // Should be exactly 25 chars or less
-    try std.testing.expect(result.len <= 25);
+    // Should contain full identifier without truncation
+    try std.testing.expectEqualStrings("very-long-organization/very-long-repository#12345", result);
+}
+
+test "calcMaxIdentifierWidth - returns max width" {
+    const prs = [_]PullRequest{
+        .{
+            .org = "k8s",
+            .repo = "kube",
+            .number = 1,
+            .title = "Test",
+            .url = "url",
+            .author = "author",
+            .created_at = 0,
+            .last_comment_at = null,
+            .unique_commenters = 0,
+        },
+        .{
+            .org = "very-long-organization",
+            .repo = "very-long-repository",
+            .number = 12345,
+            .title = "Test",
+            .url = "url",
+            .author = "author",
+            .created_at = 0,
+            .last_comment_at = null,
+            .unique_commenters = 0,
+        },
+    };
+
+    const width = calcMaxIdentifierWidth(&prs);
+    // "very-long-organization/very-long-repository#12345" = 49 chars
+    try std.testing.expectEqual(@as(usize, 49), width);
+}
+
+test "calcMaxIdentifierWidth - minimum width" {
+    const prs = [_]PullRequest{
+        .{
+            .org = "a",
+            .repo = "b",
+            .number = 1,
+            .title = "Test",
+            .url = "url",
+            .author = "author",
+            .created_at = 0,
+            .last_comment_at = null,
+            .unique_commenters = 0,
+        },
+    };
+
+    const width = calcMaxIdentifierWidth(&prs);
+    // "a/b#1" = 5 chars, but minimum is 12 (header width)
+    try std.testing.expectEqual(@as(usize, 12), width);
 }
 
 test "formatMineOutput - empty list" {
@@ -479,4 +539,28 @@ test "formatTeamOutput - single PR" {
     try std.testing.expect(std.mem.indexOf(u8, buffer.items, "k8s/kube#1234") != null);
     try std.testing.expect(std.mem.indexOf(u8, buffer.items, "Fix node scheduling bug") != null);
     try std.testing.expect(std.mem.indexOf(u8, buffer.items, "AUTHOR") != null);
+}
+
+test "formatMineOutput - long identifiers not truncated" {
+    var buffer: std.ArrayListUnmanaged(u8) = .empty;
+    defer buffer.deinit(std.testing.allocator);
+
+    const prs = [_]PullRequest{
+        .{
+            .org = "very-long-organization",
+            .repo = "very-long-repository",
+            .number = 12345,
+            .title = "Test PR",
+            .url = "https://github.com/very-long-organization/very-long-repository/pull/12345",
+            .author = "alice",
+            .created_at = 100,
+            .last_comment_at = null,
+            .unique_commenters = 0,
+        },
+    };
+
+    try formatMineOutput(std.testing.allocator, buffer.writer(std.testing.allocator), &prs, 1000);
+
+    // Check that full identifier is present (not truncated)
+    try std.testing.expect(std.mem.indexOf(u8, buffer.items, "very-long-organization/very-long-repository#12345") != null);
 }
