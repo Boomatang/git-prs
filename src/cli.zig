@@ -3,11 +3,13 @@ const std = @import("std");
 pub const MineArgs = struct {
     org_filter: ?[]const u8 = null, // --org value or null
     limit: u32 = 50, // --limit value, default 50
+    json: bool = false, // --json flag for JSON output
 };
 
 pub const TeamArgs = struct {
     org: ?[]const u8 = null, // --org value (may be auto-selected if only one team configured)
     member_filter: ?[]const u8 = null, // --member value or null
+    json: bool = false, // --json flag for JSON output
 };
 
 pub const Command = union(enum) {
@@ -70,6 +72,8 @@ fn parseMineArgs(args: []const []const u8) ParseError!MineArgs {
             result.limit = std.fmt.parseInt(u32, args[i], 10) catch {
                 return error.InvalidLimitValue;
             };
+        } else if (std.mem.eql(u8, arg, "--json")) {
+            result.json = true;
         } else {
             return error.InvalidFlag;
         }
@@ -99,6 +103,8 @@ fn parseTeamArgs(args: []const []const u8) ParseError!TeamArgs {
                 return error.MissingFlagValue;
             }
             result.member_filter = args[i];
+        } else if (std.mem.eql(u8, arg, "--json")) {
+            result.json = true;
         } else {
             return error.InvalidFlag;
         }
@@ -125,10 +131,12 @@ pub fn printUsage(writer: anytype) !void {
         \\MINE OPTIONS:
         \\    --org <name>           Filter to specific org (optional)
         \\    --limit <n>            Max PRs to show (default: 50)
+        \\    --json                 Output as JSON array
         \\
         \\TEAM OPTIONS:
         \\    --org <name>           Which org to check (auto-selected if only one configured)
         \\    --member <username>    Filter to specific team member (optional)
+        \\    --json                 Output as JSON array
         \\
         \\EXAMPLES:
         \\    git-prs mine
@@ -303,4 +311,42 @@ test "missing --member value returns error" {
 
     const result = parseArgs(allocator, &args);
     try std.testing.expectError(error.MissingFlagValue, result);
+}
+
+test "mine with --json flag" {
+    const allocator = std.testing.allocator;
+    const args = [_][]const u8{ "mine", "--json" };
+
+    const result = try parseArgs(allocator, &args);
+    try std.testing.expectEqual(Command.mine, std.meta.activeTag(result));
+    try std.testing.expect(result.mine.json);
+}
+
+test "mine with --org and --json flags" {
+    const allocator = std.testing.allocator;
+    const args = [_][]const u8{ "mine", "--org", "kubernetes", "--json" };
+
+    const result = try parseArgs(allocator, &args);
+    try std.testing.expectEqual(Command.mine, std.meta.activeTag(result));
+    try std.testing.expectEqualStrings("kubernetes", result.mine.org_filter.?);
+    try std.testing.expect(result.mine.json);
+}
+
+test "team with --json flag" {
+    const allocator = std.testing.allocator;
+    const args = [_][]const u8{ "team", "--json" };
+
+    const result = try parseArgs(allocator, &args);
+    try std.testing.expectEqual(Command.team, std.meta.activeTag(result));
+    try std.testing.expect(result.team.json);
+}
+
+test "team with --org and --json flags" {
+    const allocator = std.testing.allocator;
+    const args = [_][]const u8{ "team", "--org", "my-company", "--json" };
+
+    const result = try parseArgs(allocator, &args);
+    try std.testing.expectEqual(Command.team, std.meta.activeTag(result));
+    try std.testing.expectEqualStrings("my-company", result.team.org.?);
+    try std.testing.expect(result.team.json);
 }

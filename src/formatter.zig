@@ -260,6 +260,79 @@ pub fn formatTeamOutput(
     }
 }
 
+/// Write a JSON-escaped string
+fn writeJsonString(writer: anytype, s: []const u8) !void {
+    try writer.writeByte('"');
+    for (s) |c| {
+        switch (c) {
+            '"' => try writer.writeAll("\\\""),
+            '\\' => try writer.writeAll("\\\\"),
+            '\n' => try writer.writeAll("\\n"),
+            '\r' => try writer.writeAll("\\r"),
+            '\t' => try writer.writeAll("\\t"),
+            else => {
+                if (c < 0x20) {
+                    try writer.print("\\u{x:0>4}", .{c});
+                } else {
+                    try writer.writeByte(c);
+                }
+            },
+        }
+    }
+    try writer.writeByte('"');
+}
+
+/// Format a single PR as JSON object
+fn formatPrAsJson(writer: anytype, pr: PullRequest) !void {
+    try writer.writeAll("{");
+
+    try writer.writeAll("\"org\":");
+    try writeJsonString(writer, pr.org);
+
+    try writer.writeAll(",\"repo\":");
+    try writeJsonString(writer, pr.repo);
+
+    try writer.print(",\"number\":{d}", .{pr.number});
+
+    try writer.writeAll(",\"title\":");
+    try writeJsonString(writer, pr.title);
+
+    try writer.writeAll(",\"url\":");
+    try writeJsonString(writer, pr.url);
+
+    try writer.writeAll(",\"author\":");
+    try writeJsonString(writer, pr.author);
+
+    try writer.print(",\"created_at\":{d}", .{pr.created_at});
+
+    if (pr.last_comment_at) |last| {
+        try writer.print(",\"last_comment_at\":{d}", .{last});
+    } else {
+        try writer.writeAll(",\"last_comment_at\":null");
+    }
+
+    try writer.print(",\"unique_commenters\":{d}", .{pr.unique_commenters});
+
+    try writer.writeAll("}");
+}
+
+/// Format PRs as JSON array output
+pub fn formatJsonOutput(
+    writer: anytype,
+    prs: []const PullRequest,
+) !void {
+    try writer.writeByte('[');
+
+    for (prs, 0..) |pr, i| {
+        if (i > 0) {
+            try writer.writeByte(',');
+        }
+        try formatPrAsJson(writer, pr);
+    }
+
+    try writer.writeAll("]\n");
+}
+
 // Tests
 
 test "truncate function - no truncation needed" {
@@ -571,4 +644,49 @@ test "formatMineOutput - long identifiers not truncated" {
 
     // Check that full identifier is present (not truncated)
     try std.testing.expect(std.mem.indexOf(u8, buffer.items, "very-long-organization/very-long-repository#12345") != null);
+}
+
+test "formatJsonOutput - single PR" {
+    var buffer: std.ArrayListUnmanaged(u8) = .empty;
+    defer buffer.deinit(std.testing.allocator);
+
+    const prs = [_]PullRequest{
+        .{
+            .org = "k8s",
+            .repo = "kube",
+            .number = 1234,
+            .title = "Fix node scheduling bug",
+            .url = "https://github.com/k8s/kube/pull/1234",
+            .author = "alice",
+            .created_at = 1705322096,
+            .last_comment_at = 1705400000,
+            .unique_commenters = 4,
+        },
+    };
+
+    try formatJsonOutput(buffer.writer(std.testing.allocator), &prs);
+
+    // Check that output is valid JSON containing expected fields
+    try std.testing.expect(std.mem.indexOf(u8, buffer.items, "\"org\":\"k8s\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buffer.items, "\"repo\":\"kube\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buffer.items, "\"number\":1234") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buffer.items, "\"title\":\"Fix node scheduling bug\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buffer.items, "\"url\":\"https://github.com/k8s/kube/pull/1234\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buffer.items, "\"author\":\"alice\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buffer.items, "\"created_at\":1705322096") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buffer.items, "\"last_comment_at\":1705400000") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buffer.items, "\"unique_commenters\":4") != null);
+    // Should be an array
+    try std.testing.expect(buffer.items[0] == '[');
+}
+
+test "formatJsonOutput - empty list" {
+    var buffer: std.ArrayListUnmanaged(u8) = .empty;
+    defer buffer.deinit(std.testing.allocator);
+
+    const prs: []const PullRequest = &[_]PullRequest{};
+    try formatJsonOutput(buffer.writer(std.testing.allocator), prs);
+
+    // Should output empty array
+    try std.testing.expectEqualStrings("[]\n", buffer.items);
 }

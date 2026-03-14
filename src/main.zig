@@ -96,13 +96,17 @@ fn runMineCommand(
         allocator.free(prs);
     }
 
-    // Get current time for age calculations
-    const current_time = std.time.timestamp();
-
     // Format and output using buffer
     var output_buf: [65536]u8 = undefined;
     var fbs = std.io.fixedBufferStream(&output_buf);
-    try formatter.formatMineOutput(allocator, fbs.writer(), prs, current_time);
+
+    if (args.json) {
+        try formatter.formatJsonOutput(fbs.writer(), prs);
+    } else {
+        // Get current time for age calculations
+        const current_time = std.time.timestamp();
+        try formatter.formatMineOutput(allocator, fbs.writer(), prs, current_time);
+    }
     _ = try stdout.write(fbs.getWritten());
 }
 
@@ -176,13 +180,17 @@ fn runTeamCommand(
         allocator.free(prs);
     }
 
-    // Get current time for age calculations
-    const current_time = std.time.timestamp();
-
     // Format and output using buffer
     var output_buf: [65536]u8 = undefined;
     var fbs = std.io.fixedBufferStream(&output_buf);
-    try formatter.formatTeamOutput(allocator, fbs.writer(), prs, current_time);
+
+    if (args.json) {
+        try formatter.formatJsonOutput(fbs.writer(), prs);
+    } else {
+        // Get current time for age calculations
+        const current_time = std.time.timestamp();
+        try formatter.formatTeamOutput(allocator, fbs.writer(), prs, current_time);
+    }
     _ = try stdout.write(fbs.getWritten());
 }
 
