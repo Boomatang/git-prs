@@ -126,43 +126,57 @@ fn runTeamCommand(
     };
     defer cfg.deinit();
 
-    // Determine which org to use
-    const org = blk: {
-        if (args.org) |specified_org| {
-            // User specified an org, verify it exists in config (case-insensitive)
-            const matched_org = findTeamKeyCaseInsensitive(cfg.teams, specified_org);
-            if (matched_org == null) {
+    // Team selection logic: explicit name > default > single-team auto-select > error
+    const selected_team_name = blk: {
+        // 1. If explicit team name provided, use that
+        if (args.team_name) |team_name| {
+            if (!cfg.teams.teams.contains(team_name)) {
                 var buf: [256]u8 = undefined;
-                const msg = std.fmt.bufPrint(&buf, "No team configured for org '{s}'\n", .{specified_org}) catch "No team configured\n";
+                const msg = std.fmt.bufPrint(&buf, "Team '{s}' not found in config\n", .{team_name}) catch "Team not found\n";
                 _ = stderr.write(msg) catch {};
                 std.process.exit(1);
             }
-            break :blk matched_org.?;
-        } else {
-            // Auto-select if only one team configured
-            const team_count = cfg.teams.count();
-            if (team_count == 0) {
-                _ = stderr.write("No teams configured in config file\n") catch {};
-                std.process.exit(1);
-            } else if (team_count == 1) {
-                // Auto-select the single team
-                var it = cfg.teams.iterator();
-                if (it.next()) |entry| {
-                    break :blk entry.key_ptr.*;
-                }
-                unreachable;
-            } else {
-                // Multiple teams, need to specify
-                _ = stderr.write("Multiple teams configured. Specify --org\n") catch {};
-                std.process.exit(1);
-            }
+            break :blk team_name;
         }
+
+        // 2. If default is set, use that
+        if (cfg.teams.default) |default_team| {
+            break :blk default_team;
+        }
+
+        // 3. If only one team, auto-select
+        const team_count = cfg.teams.teams.count();
+        if (team_count == 0) {
+            _ = stderr.write("No teams configured in config file\n") catch {};
+            std.process.exit(1);
+        } else if (team_count == 1) {
+            var it = cfg.teams.teams.iterator();
+            if (it.next()) |entry| {
+                break :blk entry.key_ptr.*;
+            }
+            unreachable;
+        }
+
+        // 4. Multiple teams without default and no explicit name -> error
+        _ = stderr.write("Multiple teams configured. Specify team name or set default in config.\n") catch {};
+        _ = stderr.write("Available teams: ") catch {};
+        var it = cfg.teams.teams.iterator();
+        var first = true;
+        while (it.next()) |entry| {
+            if (!first) {
+                _ = stderr.write(", ") catch {};
+            }
+            _ = stderr.write(entry.key_ptr.*) catch {};
+            first = false;
+        }
+        _ = stderr.write("\n") catch {};
+        std.process.exit(1);
     };
 
-    // Get team members for this org
-    const team_config = cfg.teams.get(org) orelse {
+    // Get the selected team configuration
+    const team_config = cfg.teams.teams.get(selected_team_name) orelse {
         var buf: [256]u8 = undefined;
-        const msg = std.fmt.bufPrint(&buf, "No team configured for org '{s}'\n", .{org}) catch "No team configured\n";
+        const msg = std.fmt.bufPrint(&buf, "Team '{s}' not found in config\n", .{selected_team_name}) catch "Team not found\n";
         _ = stderr.write(msg) catch {};
         std.process.exit(1);
     };
@@ -175,16 +189,32 @@ fn runTeamCommand(
     const effective_since = args.since orelse team_config.since;
     const effective_until = args.until orelse team_config.until;
 
-    // Fetch PRs with date filters
-    const prs = github.fetchTeamPRs(&client, org, team_config.members, args.member_filter, effective_since, effective_until) catch |err| {
-        handleGitHubError(err, stderr);
-        std.process.exit(1);
-    };
+    // Fetch PRs for all orgs in the team
+    var all_prs: std.ArrayListUnmanaged(github.PullRequest) = .empty;
     defer {
-        for (prs) |*pr| {
+        for (all_prs.items) |*pr| {
             pr.deinit(allocator);
         }
-        allocator.free(prs);
+        all_prs.deinit(allocator);
+    }
+
+    for (team_config.orgs) |org| {
+        // Skip org if --org filter is set and doesn't match
+        if (args.org) |org_filter| {
+            if (!std.mem.eql(u8, org, org_filter)) {
+                continue;
+            }
+        }
+
+        const prs = github.fetchTeamPRs(&client, org, team_config.members, args.member_filter, effective_since, effective_until) catch |err| {
+            handleGitHubError(err, stderr);
+            std.process.exit(1);
+        };
+        defer allocator.free(prs);
+
+        for (prs) |pr| {
+            try all_prs.append(allocator, pr);
+        }
     }
 
     // Format and output using buffer
@@ -192,11 +222,11 @@ fn runTeamCommand(
     var fbs = std.io.fixedBufferStream(&output_buf);
 
     if (args.json) {
-        try formatter.formatJsonOutput(fbs.writer(), prs);
+        try formatter.formatJsonOutput(fbs.writer(), all_prs.items);
     } else {
         // Get current time for age calculations
         const current_time = std.time.timestamp();
-        try formatter.formatTeamOutput(allocator, fbs.writer(), prs, current_time);
+        try formatter.formatTeamOutput(allocator, fbs.writer(), all_prs.items, current_time);
     }
     _ = try stdout.write(fbs.getWritten());
 }
@@ -221,6 +251,18 @@ fn handleConfigError(err: anyerror, stderr: std.fs.File) void {
         error.EmptyTeamMembers => {
             _ = stderr.write("Config error: team has no members listed\n") catch {};
         },
+        error.EmptyTeamOrgs => {
+            _ = stderr.write("Config error: team has empty orgs array\n") catch {};
+        },
+        error.MissingTeamOrgs => {
+            _ = stderr.write("Config error: team must have 'orgs' field\n") catch {};
+        },
+        error.InvalidDefaultTeam => {
+            _ = stderr.write("Config error: 'default' references non-existent team\n") catch {};
+        },
+        error.NoDefaultTeam => {
+            _ = stderr.write("Config error: multiple teams configured but no default specified\n") catch {};
+        },
         error.InvalidDateFormat => {
             _ = stderr.write("Config error: Invalid date format. Use YYYY-MM-DD format.\n") catch {};
         },
@@ -234,36 +276,6 @@ fn handleConfigError(err: anyerror, stderr: std.fs.File) void {
             _ = stderr.write("Failed to load config\n") catch {};
         },
     }
-}
-
-/// Find a team config key case-insensitively
-/// Returns the actual key from the config if a case-insensitive match is found
-fn findTeamKeyCaseInsensitive(teams: anytype, search_key: []const u8) ?[]const u8 {
-    var it = teams.iterator();
-    while (it.next()) |entry| {
-        if (std.ascii.eqlIgnoreCase(entry.key_ptr.*, search_key)) {
-            return entry.key_ptr.*;
-        }
-    }
-    return null;
-}
-
-test "findTeamKeyCaseInsensitive - matches case-insensitively" {
-    var teams = std.StringHashMap([]const []const u8).init(std.testing.allocator);
-    defer teams.deinit();
-
-    const members: []const []const u8 = &.{"alice"};
-    try teams.put("Kubernetes", members);
-
-    // Should match with different casings
-    try std.testing.expectEqualStrings("Kubernetes", findTeamKeyCaseInsensitive(teams, "kubernetes").?);
-    try std.testing.expectEqualStrings("Kubernetes", findTeamKeyCaseInsensitive(teams, "KUBERNETES").?);
-    try std.testing.expectEqualStrings("Kubernetes", findTeamKeyCaseInsensitive(teams, "KuBeRnEtEs").?);
-    try std.testing.expectEqualStrings("Kubernetes", findTeamKeyCaseInsensitive(teams, "Kubernetes").?);
-
-    // Should not match different string
-    try std.testing.expectEqual(@as(?[]const u8, null), findTeamKeyCaseInsensitive(teams, "kubernetess"));
-    try std.testing.expectEqual(@as(?[]const u8, null), findTeamKeyCaseInsensitive(teams, "openshift"));
 }
 
 fn handleGitHubError(err: anyerror, stderr: std.fs.File) void {

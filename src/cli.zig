@@ -9,6 +9,7 @@ pub const MineArgs = struct {
 };
 
 pub const TeamArgs = struct {
+    team_name: ?[]const u8 = null, // positional team name argument
     org: ?[]const u8 = null, // --org value (may be auto-selected if only one team configured)
     member_filter: ?[]const u8 = null, // --member value or null
     json: bool = false, // --json flag for JSON output
@@ -125,6 +126,12 @@ fn parseTeamArgs(args: []const []const u8) ParseError!TeamArgs {
     var result = TeamArgs{};
     var i: usize = 0;
 
+    // Parse optional positional team name (first arg if it doesn't start with --)
+    if (args.len > 0 and !std.mem.startsWith(u8, args[0], "--")) {
+        result.team_name = args[0];
+        i = 1;
+    }
+
     while (i < args.len) {
         const arg = args[i];
 
@@ -182,7 +189,7 @@ pub fn printUsage(writer: anytype) !void {
         \\
         \\COMMANDS:
         \\    mine                   List PRs assigned to you
-        \\    team                   List PRs for your team
+        \\    team [name]            List PRs for your team
         \\    --help, -h             Show this help message
         \\
         \\MINE OPTIONS:
@@ -193,7 +200,8 @@ pub fn printUsage(writer: anytype) !void {
         \\    --json                 Output as JSON array
         \\
         \\TEAM OPTIONS:
-        \\    --org <name>           Which org to check (auto-selected if only one configured)
+        \\    [name]                 Team name (uses default or auto-selects if omitted)
+        \\    --org <name>           Filter to specific org (optional)
         \\    --member <username>    Filter to specific team member (optional)
         \\    --since <YYYY-MM-DD>   Only PRs created on or after this date (overrides config)
         \\    --until <YYYY-MM-DD>   Only PRs created on or before this date (overrides config)
@@ -203,9 +211,10 @@ pub fn printUsage(writer: anytype) !void {
         \\    git-prs mine
         \\    git-prs mine --org kubernetes --limit 10
         \\    git-prs mine --since 2025-01-01
-        \\    git-prs team --org my-company
-        \\    git-prs team --org my-company --member alice
-        \\    git-prs team --org my-company --since 2025-01-01 --until 2025-06-30
+        \\    git-prs team
+        \\    git-prs team release
+        \\    git-prs team release --member alice
+        \\    git-prs team traffic --since 2025-01-01 --until 2025-06-30
         \\
     );
 }

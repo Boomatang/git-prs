@@ -5,16 +5,22 @@ const std = @import("std");
 const fs = std.fs;
 const process = std.process;
 
-pub const TeamConfig = struct {
+pub const NamedTeamConfig = struct {
+    orgs: []const []const u8,
     members: []const []const u8,
-    since: ?[]const u8 = null, // Optional YYYY-MM-DD
-    until: ?[]const u8 = null, // Optional YYYY-MM-DD
+    since: ?[]const u8 = null,
+    until: ?[]const u8 = null,
+};
+
+pub const TeamsConfig = struct {
+    default: ?[]const u8,
+    teams: std.StringHashMapUnmanaged(NamedTeamConfig),
 };
 
 pub const Config = struct {
     allocator: std.mem.Allocator,
     mine_orgs: []const []const u8,
-    teams: std.StringHashMapUnmanaged(TeamConfig),
+    teams: TeamsConfig,
     auth_token: []const u8,
     authenticated_user: []const u8,
 
@@ -25,11 +31,20 @@ pub const Config = struct {
         }
         self.allocator.free(self.mine_orgs);
 
+        // Free teams default value
+        if (self.teams.default) |default_val| {
+            self.allocator.free(default_val);
+        }
+
         // Free teams hash map
-        var it = self.teams.iterator();
+        var it = self.teams.teams.iterator();
         while (it.next()) |entry| {
             self.allocator.free(entry.key_ptr.*);
             const team_config = entry.value_ptr.*;
+            for (team_config.orgs) |org| {
+                self.allocator.free(org);
+            }
+            self.allocator.free(team_config.orgs);
             for (team_config.members) |member| {
                 self.allocator.free(member);
             }
@@ -41,7 +56,7 @@ pub const Config = struct {
                 self.allocator.free(until);
             }
         }
-        self.teams.deinit(self.allocator);
+        self.teams.teams.deinit(self.allocator);
 
         // Free auth token and user
         self.allocator.free(self.auth_token);
@@ -64,6 +79,10 @@ pub const ConfigError = error{
     NetworkSubsystemFailed,
     StdoutStreamTooLong,
     StderrStreamTooLong,
+    EmptyTeamOrgs,
+    MissingTeamOrgs,
+    InvalidDefaultTeam,
+    NoDefaultTeam,
 } || std.mem.Allocator.Error || std.fs.File.OpenError || std.fs.File.ReadError || std.process.Child.SpawnError;
 
 /// Load configuration from XDG config directory.
@@ -106,12 +125,22 @@ pub fn loadConfig(allocator: std.mem.Allocator) ConfigError!Config {
     const mine_orgs = try parseMineOrgs(allocator, root.object);
 
     // Extract and validate teams (optional)
-    var teams = std.StringHashMapUnmanaged(TeamConfig){};
+    var teams = TeamsConfig{
+        .default = null,
+        .teams = std.StringHashMapUnmanaged(NamedTeamConfig){},
+    };
     errdefer {
-        var it = teams.iterator();
+        if (teams.default) |default_val| {
+            allocator.free(default_val);
+        }
+        var it = teams.teams.iterator();
         while (it.next()) |entry| {
             allocator.free(entry.key_ptr.*);
             const team_config = entry.value_ptr.*;
+            for (team_config.orgs) |org| {
+                allocator.free(org);
+            }
+            allocator.free(team_config.orgs);
             for (team_config.members) |member| {
                 allocator.free(member);
             }
@@ -123,11 +152,11 @@ pub fn loadConfig(allocator: std.mem.Allocator) ConfigError!Config {
                 allocator.free(until);
             }
         }
-        teams.deinit(allocator);
+        teams.teams.deinit(allocator);
     }
 
-    if (root.object.get("team")) |team_value| {
-        teams = try parseTeams(allocator, team_value);
+    if (root.object.get("teams")) |teams_value| {
+        teams = try parseTeamsConfig(allocator, teams_value);
     }
 
     // Get auth token
@@ -208,16 +237,26 @@ fn validateDateFormat(date_str: []const u8) bool {
     return true;
 }
 
-/// Parse and validate teams from JSON
-fn parseTeams(allocator: std.mem.Allocator, team_value: std.json.Value) ConfigError!std.StringHashMapUnmanaged(TeamConfig) {
-    if (team_value != .object) return ConfigError.InvalidJson;
+/// Parse and validate teams from new "teams" structure
+fn parseTeamsConfig(allocator: std.mem.Allocator, teams_value: std.json.Value) ConfigError!TeamsConfig {
+    if (teams_value != .object) return ConfigError.InvalidJson;
 
-    var teams = std.StringHashMapUnmanaged(TeamConfig){};
+    var result = TeamsConfig{
+        .default = null,
+        .teams = std.StringHashMapUnmanaged(NamedTeamConfig){},
+    };
     errdefer {
-        var it = teams.iterator();
+        if (result.default) |default_val| {
+            allocator.free(default_val);
+        }
+        var it = result.teams.iterator();
         while (it.next()) |entry| {
             allocator.free(entry.key_ptr.*);
             const team_config = entry.value_ptr.*;
+            for (team_config.orgs) |org| {
+                allocator.free(org);
+            }
+            allocator.free(team_config.orgs);
             for (team_config.members) |member| {
                 allocator.free(member);
             }
@@ -229,17 +268,57 @@ fn parseTeams(allocator: std.mem.Allocator, team_value: std.json.Value) ConfigEr
                 allocator.free(until);
             }
         }
-        teams.deinit(allocator);
+        result.teams.deinit(allocator);
     }
 
-    var it = team_value.object.iterator();
+    // Parse default field if present
+    if (teams_value.object.get("default")) |default_value| {
+        if (default_value != .string) return ConfigError.InvalidJson;
+        result.default = try allocator.dupe(u8, default_value.string);
+    }
+
+    // Parse all team objects
+    var it = teams_value.object.iterator();
     while (it.next()) |entry| {
-        const org_name = entry.key_ptr.*;
+        const team_name = entry.key_ptr.*;
         const team_obj = entry.value_ptr.*;
+
+        // Skip the "default" key
+        if (std.mem.eql(u8, team_name, "default")) continue;
 
         if (team_obj != .object) return ConfigError.InvalidJson;
 
-        // Parse members array
+        // Parse orgs array (required)
+        const orgs_value = team_obj.object.get("orgs") orelse return ConfigError.MissingTeamOrgs;
+        if (orgs_value != .array) return ConfigError.MissingTeamOrgs;
+        const orgs_array = orgs_value.array;
+        if (orgs_array.items.len == 0) return ConfigError.EmptyTeamOrgs;
+
+        var orgs = try std.ArrayList([]const u8).initCapacity(allocator, orgs_array.items.len);
+        errdefer {
+            for (orgs.items) |org| {
+                allocator.free(org);
+            }
+            orgs.deinit(allocator);
+        }
+
+        for (orgs_array.items) |org_value| {
+            if (org_value != .string) return ConfigError.InvalidJson;
+            const org_str = org_value.string;
+            if (org_str.len == 0) return ConfigError.EmptyOrgName;
+            const org_copy = try allocator.dupe(u8, org_str);
+            try orgs.append(allocator, org_copy);
+        }
+
+        const orgs_slice = try orgs.toOwnedSlice(allocator);
+        errdefer {
+            for (orgs_slice) |org| {
+                allocator.free(org);
+            }
+            allocator.free(orgs_slice);
+        }
+
+        // Parse members array (required)
         const members_value = team_obj.object.get("members") orelse return ConfigError.InvalidJson;
         if (members_value != .array) return ConfigError.InvalidJson;
         const members_array = members_value.array;
@@ -289,17 +368,25 @@ fn parseTeams(allocator: std.mem.Allocator, team_value: std.json.Value) ConfigEr
             until_copy = try allocator.dupe(u8, until_str);
         }
 
-        const team_config = TeamConfig{
+        const team_config = NamedTeamConfig{
+            .orgs = orgs_slice,
             .members = members_slice,
             .since = since_copy,
             .until = until_copy,
         };
 
-        const org_name_copy = try allocator.dupe(u8, org_name);
-        try teams.put(allocator, org_name_copy, team_config);
+        const team_name_copy = try allocator.dupe(u8, team_name);
+        try result.teams.put(allocator, team_name_copy, team_config);
     }
 
-    return teams;
+    // Validate default references an existing team
+    if (result.default) |default_name| {
+        if (!result.teams.contains(default_name)) {
+            return ConfigError.InvalidDefaultTeam;
+        }
+    }
+
+    return result;
 }
 
 /// Get GitHub auth token by running `gh auth token`
@@ -335,10 +422,16 @@ fn printConfigNotFoundError() void {
         \\  "mine": {
         \\    "orgs": ["jfitzpat", "kubernetes", "my-company"]
         \\  },
-        \\  "team": {
-        \\    "my-company": {
+        \\  "teams": {
+        \\    "default": "release",
+        \\    "release": {
+        \\      "orgs": ["my-company", "other-org"],
         \\      "members": ["alice", "bob", "charlie"],
         \\      "since": "2025-01-01"
+        \\    },
+        \\    "traffic": {
+        \\      "orgs": ["my-company"],
+        \\      "members": ["dave", "eve"]
         \\    }
         \\  }
         \\}
@@ -461,195 +554,6 @@ test "parseMineOrgs with empty org name" {
     try std.testing.expectError(ConfigError.EmptyOrgName, result);
 }
 
-test "parseTeams with valid data" {
-    const allocator = std.testing.allocator;
-
-    const json_str =
-        \\{
-        \\  "my-company": {
-        \\    "members": ["alice", "bob"],
-        \\    "since": "2025-01-01"
-        \\  },
-        \\  "other-org": {
-        \\    "members": ["charlie"]
-        \\  }
-        \\}
-    ;
-
-    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, json_str, .{});
-    defer parsed.deinit();
-
-    var teams = try parseTeams(allocator, parsed.value);
-    defer {
-        var it = teams.iterator();
-        while (it.next()) |entry| {
-            allocator.free(entry.key_ptr.*);
-            const team_config = entry.value_ptr.*;
-            for (team_config.members) |member| {
-                allocator.free(member);
-            }
-            allocator.free(team_config.members);
-            if (team_config.since) |since| {
-                allocator.free(since);
-            }
-            if (team_config.until) |until| {
-                allocator.free(until);
-            }
-        }
-        teams.deinit(allocator);
-    }
-
-    try std.testing.expectEqual(@as(usize, 2), teams.count());
-
-    const my_company = teams.get("my-company").?;
-    try std.testing.expectEqual(@as(usize, 2), my_company.members.len);
-    try std.testing.expectEqualStrings("alice", my_company.members[0]);
-    try std.testing.expectEqualStrings("bob", my_company.members[1]);
-    try std.testing.expect(my_company.since != null);
-    try std.testing.expectEqualStrings("2025-01-01", my_company.since.?);
-    try std.testing.expect(my_company.until == null);
-
-    const other_org = teams.get("other-org").?;
-    try std.testing.expectEqual(@as(usize, 1), other_org.members.len);
-    try std.testing.expectEqualStrings("charlie", other_org.members[0]);
-    try std.testing.expect(other_org.since == null);
-    try std.testing.expect(other_org.until == null);
-}
-
-test "parseTeams with empty members array" {
-    const allocator = std.testing.allocator;
-
-    const json_str =
-        \\{
-        \\  "my-company": {
-        \\    "members": []
-        \\  }
-        \\}
-    ;
-
-    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, json_str, .{});
-    defer parsed.deinit();
-
-    const result = parseTeams(allocator, parsed.value);
-    try std.testing.expectError(ConfigError.EmptyTeamMembers, result);
-}
-
-test "full config parsing with teams" {
-    const allocator = std.testing.allocator;
-
-    const json_str =
-        \\{
-        \\  "mine": {
-        \\    "orgs": ["jfitzpat", "kubernetes"]
-        \\  },
-        \\  "team": {
-        \\    "jfitzpat": {
-        \\      "members": ["alice", "bob"],
-        \\      "since": "2025-01-15"
-        \\    },
-        \\    "kubernetes": {
-        \\      "members": ["charlie", "dave", "eve"],
-        \\      "since": "2024-01-01",
-        \\      "until": "2024-12-31"
-        \\    }
-        \\  }
-        \\}
-    ;
-
-    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, json_str, .{});
-    defer parsed.deinit();
-
-    const root = parsed.value;
-
-    // Parse mine_orgs
-    const mine_orgs = try parseMineOrgs(allocator, root.object);
-    defer {
-        for (mine_orgs) |org| {
-            allocator.free(org);
-        }
-        allocator.free(mine_orgs);
-    }
-
-    try std.testing.expectEqual(@as(usize, 2), mine_orgs.len);
-    try std.testing.expectEqualStrings("jfitzpat", mine_orgs[0]);
-    try std.testing.expectEqualStrings("kubernetes", mine_orgs[1]);
-
-    // Parse teams
-    const team_value = root.object.get("team").?;
-    var teams = try parseTeams(allocator, team_value);
-    defer {
-        var it = teams.iterator();
-        while (it.next()) |entry| {
-            allocator.free(entry.key_ptr.*);
-            const team_config = entry.value_ptr.*;
-            for (team_config.members) |member| {
-                allocator.free(member);
-            }
-            allocator.free(team_config.members);
-            if (team_config.since) |since| {
-                allocator.free(since);
-            }
-            if (team_config.until) |until| {
-                allocator.free(until);
-            }
-        }
-        teams.deinit(allocator);
-    }
-
-    try std.testing.expectEqual(@as(usize, 2), teams.count());
-
-    const jfitzpat_team = teams.get("jfitzpat").?;
-    try std.testing.expectEqual(@as(usize, 2), jfitzpat_team.members.len);
-    try std.testing.expectEqualStrings("alice", jfitzpat_team.members[0]);
-    try std.testing.expectEqualStrings("bob", jfitzpat_team.members[1]);
-    try std.testing.expect(jfitzpat_team.since != null);
-    try std.testing.expectEqualStrings("2025-01-15", jfitzpat_team.since.?);
-    try std.testing.expect(jfitzpat_team.until == null);
-
-    const kubernetes_team = teams.get("kubernetes").?;
-    try std.testing.expectEqual(@as(usize, 3), kubernetes_team.members.len);
-    try std.testing.expectEqualStrings("charlie", kubernetes_team.members[0]);
-    try std.testing.expectEqualStrings("dave", kubernetes_team.members[1]);
-    try std.testing.expectEqualStrings("eve", kubernetes_team.members[2]);
-    try std.testing.expect(kubernetes_team.since != null);
-    try std.testing.expectEqualStrings("2024-01-01", kubernetes_team.since.?);
-    try std.testing.expect(kubernetes_team.until != null);
-    try std.testing.expectEqualStrings("2024-12-31", kubernetes_team.until.?);
-}
-
-test "full config parsing without teams" {
-    const allocator = std.testing.allocator;
-
-    const json_str =
-        \\{
-        \\  "mine": {
-        \\    "orgs": ["jfitzpat"]
-        \\  }
-        \\}
-    ;
-
-    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, json_str, .{});
-    defer parsed.deinit();
-
-    const root = parsed.value;
-
-    // Parse mine_orgs
-    const mine_orgs = try parseMineOrgs(allocator, root.object);
-    defer {
-        for (mine_orgs) |org| {
-            allocator.free(org);
-        }
-        allocator.free(mine_orgs);
-    }
-
-    try std.testing.expectEqual(@as(usize, 1), mine_orgs.len);
-    try std.testing.expectEqualStrings("jfitzpat", mine_orgs[0]);
-
-    // Verify teams is optional
-    const team_value = root.object.get("team");
-    try std.testing.expect(team_value == null);
-}
-
 test "validateDateFormat with valid dates" {
     try std.testing.expect(validateDateFormat("2025-01-15"));
     try std.testing.expect(validateDateFormat("2024-12-31"));
@@ -680,34 +584,22 @@ test "validateDateFormat with invalid dates" {
     try std.testing.expect(!validateDateFormat("2025-01-ab"));
 }
 
-test "parseTeams with invalid date format" {
+// Tests for new parseTeamsConfig function
+
+test "parseTeamsConfig with valid teams" {
     const allocator = std.testing.allocator;
 
     const json_str =
         \\{
-        \\  "my-company": {
-        \\    "members": ["alice"],
-        \\    "since": "2025/01/15"
-        \\  }
-        \\}
-    ;
-
-    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, json_str, .{});
-    defer parsed.deinit();
-
-    const result = parseTeams(allocator, parsed.value);
-    try std.testing.expectError(ConfigError.InvalidDateFormat, result);
-}
-
-test "parseTeams with both dates" {
-    const allocator = std.testing.allocator;
-
-    const json_str =
-        \\{
-        \\  "my-company": {
+        \\  "default": "release",
+        \\  "release": {
+        \\    "orgs": ["org-a", "org-b"],
         \\    "members": ["alice", "bob"],
-        \\    "since": "2024-01-01",
-        \\    "until": "2024-12-31"
+        \\    "since": "2025-01-01"
+        \\  },
+        \\  "traffic": {
+        \\    "orgs": ["org-c"],
+        \\    "members": ["charlie"]
         \\  }
         \\}
     ;
@@ -715,12 +607,19 @@ test "parseTeams with both dates" {
     const parsed = try std.json.parseFromSlice(std.json.Value, allocator, json_str, .{});
     defer parsed.deinit();
 
-    var teams = try parseTeams(allocator, parsed.value);
+    var teams_config = try parseTeamsConfig(allocator, parsed.value);
     defer {
-        var it = teams.iterator();
+        if (teams_config.default) |default_val| {
+            allocator.free(default_val);
+        }
+        var it = teams_config.teams.iterator();
         while (it.next()) |entry| {
             allocator.free(entry.key_ptr.*);
             const team_config = entry.value_ptr.*;
+            for (team_config.orgs) |org| {
+                allocator.free(org);
+            }
+            allocator.free(team_config.orgs);
             for (team_config.members) |member| {
                 allocator.free(member);
             }
@@ -732,23 +631,37 @@ test "parseTeams with both dates" {
                 allocator.free(until);
             }
         }
-        teams.deinit(allocator);
+        teams_config.teams.deinit(allocator);
     }
 
-    const team = teams.get("my-company").?;
-    try std.testing.expectEqual(@as(usize, 2), team.members.len);
-    try std.testing.expect(team.since != null);
-    try std.testing.expectEqualStrings("2024-01-01", team.since.?);
-    try std.testing.expect(team.until != null);
-    try std.testing.expectEqualStrings("2024-12-31", team.until.?);
+    try std.testing.expect(teams_config.default != null);
+    try std.testing.expectEqualStrings("release", teams_config.default.?);
+    try std.testing.expectEqual(@as(usize, 2), teams_config.teams.count());
+
+    const release = teams_config.teams.get("release").?;
+    try std.testing.expectEqual(@as(usize, 2), release.orgs.len);
+    try std.testing.expectEqualStrings("org-a", release.orgs[0]);
+    try std.testing.expectEqualStrings("org-b", release.orgs[1]);
+    try std.testing.expectEqual(@as(usize, 2), release.members.len);
+    try std.testing.expectEqualStrings("alice", release.members[0]);
+    try std.testing.expectEqualStrings("bob", release.members[1]);
+    try std.testing.expect(release.since != null);
+    try std.testing.expectEqualStrings("2025-01-01", release.since.?);
+
+    const traffic = teams_config.teams.get("traffic").?;
+    try std.testing.expectEqual(@as(usize, 1), traffic.orgs.len);
+    try std.testing.expectEqualStrings("org-c", traffic.orgs[0]);
+    try std.testing.expectEqual(@as(usize, 1), traffic.members.len);
+    try std.testing.expectEqualStrings("charlie", traffic.members[0]);
+    try std.testing.expect(traffic.since == null);
 }
 
-test "parseTeams with no dates" {
+test "parseTeamsConfig with missing orgs" {
     const allocator = std.testing.allocator;
 
     const json_str =
         \\{
-        \\  "my-company": {
+        \\  "release": {
         \\    "members": ["alice", "bob"]
         \\  }
         \\}
@@ -757,12 +670,96 @@ test "parseTeams with no dates" {
     const parsed = try std.json.parseFromSlice(std.json.Value, allocator, json_str, .{});
     defer parsed.deinit();
 
-    var teams = try parseTeams(allocator, parsed.value);
+    const result = parseTeamsConfig(allocator, parsed.value);
+    try std.testing.expectError(ConfigError.MissingTeamOrgs, result);
+}
+
+test "parseTeamsConfig with empty orgs" {
+    const allocator = std.testing.allocator;
+
+    const json_str =
+        \\{
+        \\  "release": {
+        \\    "orgs": [],
+        \\    "members": ["alice", "bob"]
+        \\  }
+        \\}
+    ;
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, json_str, .{});
+    defer parsed.deinit();
+
+    const result = parseTeamsConfig(allocator, parsed.value);
+    try std.testing.expectError(ConfigError.EmptyTeamOrgs, result);
+}
+
+test "parseTeamsConfig with empty members" {
+    const allocator = std.testing.allocator;
+
+    const json_str =
+        \\{
+        \\  "release": {
+        \\    "orgs": ["org-a"],
+        \\    "members": []
+        \\  }
+        \\}
+    ;
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, json_str, .{});
+    defer parsed.deinit();
+
+    const result = parseTeamsConfig(allocator, parsed.value);
+    try std.testing.expectError(ConfigError.EmptyTeamMembers, result);
+}
+
+test "parseTeamsConfig with invalid default" {
+    const allocator = std.testing.allocator;
+
+    const json_str =
+        \\{
+        \\  "default": "nonexistent",
+        \\  "release": {
+        \\    "orgs": ["org-a"],
+        \\    "members": ["alice"]
+        \\  }
+        \\}
+    ;
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, json_str, .{});
+    defer parsed.deinit();
+
+    const result = parseTeamsConfig(allocator, parsed.value);
+    try std.testing.expectError(ConfigError.InvalidDefaultTeam, result);
+}
+
+test "parseTeamsConfig without default" {
+    const allocator = std.testing.allocator;
+
+    const json_str =
+        \\{
+        \\  "release": {
+        \\    "orgs": ["org-a"],
+        \\    "members": ["alice"]
+        \\  }
+        \\}
+    ;
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, json_str, .{});
+    defer parsed.deinit();
+
+    var teams_config = try parseTeamsConfig(allocator, parsed.value);
     defer {
-        var it = teams.iterator();
+        if (teams_config.default) |default_val| {
+            allocator.free(default_val);
+        }
+        var it = teams_config.teams.iterator();
         while (it.next()) |entry| {
             allocator.free(entry.key_ptr.*);
             const team_config = entry.value_ptr.*;
+            for (team_config.orgs) |org| {
+                allocator.free(org);
+            }
+            allocator.free(team_config.orgs);
             for (team_config.members) |member| {
                 allocator.free(member);
             }
@@ -774,11 +771,9 @@ test "parseTeams with no dates" {
                 allocator.free(until);
             }
         }
-        teams.deinit(allocator);
+        teams_config.teams.deinit(allocator);
     }
 
-    const team = teams.get("my-company").?;
-    try std.testing.expectEqual(@as(usize, 2), team.members.len);
-    try std.testing.expect(team.since == null);
-    try std.testing.expect(team.until == null);
+    try std.testing.expect(teams_config.default == null);
+    try std.testing.expectEqual(@as(usize, 1), teams_config.teams.count());
 }
