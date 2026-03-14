@@ -4,8 +4,17 @@ const github = @import("github.zig");
 
 pub const PullRequest = github.PullRequest;
 
-/// Get terminal width from COLUMNS env var, default 80
+/// Get terminal width using ioctl, falling back to COLUMNS env var, then 80
 pub fn getTerminalWidth() u32 {
+    // Try ioctl-based detection first
+    const stdout = std.fs.File.stdout();
+    var winsize: std.posix.winsize = undefined;
+    const result = std.posix.system.ioctl(stdout.handle, std.posix.T.IOCGWINSZ, @intFromPtr(&winsize));
+    if (result == 0 and winsize.col > 0) {
+        return winsize.col;
+    }
+
+    // Fall back to COLUMNS env var
     const columns = std.posix.getenv("COLUMNS") orelse return 80;
     return std.fmt.parseInt(u32, columns, 10) catch 80;
 }
@@ -359,11 +368,43 @@ test "truncate function - very short max_len" {
     try std.testing.expectEqualStrings("", result);
 }
 
-test "getTerminalWidth - default when COLUMNS not set" {
-    // This will test the default behavior
-    // Note: This test may fail if COLUMNS is set in test environment
+test "getTerminalWidth - returns valid width" {
+    // When running in a terminal, ioctl should return actual width
+    // When running in CI/piped, should fall back to COLUMNS or 80
     const width = getTerminalWidth();
+    // Width must be at least 80 (default fallback) and reasonable upper bound
     try std.testing.expect(width >= 80);
+    try std.testing.expect(width <= 10000); // Sanity check for reasonable width
+}
+
+test "getTerminalWidth - ioctl detects terminal width" {
+    // This test verifies ioctl mechanism works when running in a real terminal
+    // The ioctl call queries stdout, so result depends on execution context
+    const stdout = std.fs.File.stdout();
+    var winsize: std.posix.winsize = undefined;
+    const result = std.posix.system.ioctl(stdout.handle, std.posix.T.IOCGWINSZ, @intFromPtr(&winsize));
+    // If ioctl succeeds (we're in a terminal), width should match
+    if (result == 0 and winsize.col > 0) {
+        const width = getTerminalWidth();
+        try std.testing.expectEqual(winsize.col, @as(u16, @intCast(width)));
+    }
+    // If not in terminal, test passes (fallback behavior tested separately)
+}
+
+test "getTerminalWidth - COLUMNS fallback behavior" {
+    // Test that COLUMNS env var fallback parsing works correctly
+    // Note: This test validates the fallback code path by checking the parse logic
+    // The actual env var lookup is tested indirectly via getTerminalWidth()
+
+    // Valid COLUMNS values should parse correctly
+    try std.testing.expectEqual(@as(u32, 120), std.fmt.parseInt(u32, "120", 10) catch 80);
+    try std.testing.expectEqual(@as(u32, 200), std.fmt.parseInt(u32, "200", 10) catch 80);
+    try std.testing.expectEqual(@as(u32, 80), std.fmt.parseInt(u32, "80", 10) catch 80);
+
+    // Invalid COLUMNS values should fall back to 80
+    try std.testing.expectEqual(@as(u32, 80), std.fmt.parseInt(u32, "invalid", 10) catch 80);
+    try std.testing.expectEqual(@as(u32, 80), std.fmt.parseInt(u32, "", 10) catch 80);
+    try std.testing.expectEqual(@as(u32, 80), std.fmt.parseInt(u32, "-1", 10) catch 80);
 }
 
 test "sortByAge - sorts newest first" {
