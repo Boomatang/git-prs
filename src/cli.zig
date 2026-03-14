@@ -30,6 +30,7 @@ pub const Command = union(enum) {
     team: TeamArgs,
     merged: MergedArgs,
     help: void,
+    version: void,
 };
 
 pub const ParseError = error{
@@ -55,6 +56,11 @@ pub fn parseArgs(allocator: std.mem.Allocator, args: []const []const u8) ParseEr
     // Check for --help flag
     if (std.mem.eql(u8, args[0], "--help") or std.mem.eql(u8, args[0], "-h")) {
         return .help;
+    }
+
+    // Check for --version flag
+    if (std.mem.eql(u8, args[0], "--version")) {
+        return .version;
     }
 
     const command_name = args[0];
@@ -441,6 +447,14 @@ test "-h flag returns help command" {
 
     const result = try parseArgs(allocator, &args);
     try std.testing.expectEqual(Command.help, std.meta.activeTag(result));
+}
+
+test "--version flag returns version command" {
+    const allocator = std.testing.allocator;
+    const args = [_][]const u8{"--version"};
+
+    const result = try parseArgs(allocator, &args);
+    try std.testing.expectEqual(Command.version, std.meta.activeTag(result));
 }
 
 test "team with no flags" {

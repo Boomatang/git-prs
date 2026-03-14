@@ -1,5 +1,6 @@
 const std = @import("std");
 const git_prs = @import("git_prs");
+const build_options = @import("build_options");
 
 const cli = git_prs.cli;
 const config = git_prs.config;
@@ -59,6 +60,10 @@ pub fn main() !void {
             var fbs = std.io.fixedBufferStream(&buf);
             cli.printUsage(fbs.writer()) catch {};
             _ = stdout.write(fbs.getWritten()) catch {};
+            return;
+        },
+        .version => {
+            _ = try stdout.write(build_options.name ++ " " ++ build_options.version ++ "\n");
             return;
         },
         .mine => |mine_args| {

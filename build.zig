@@ -21,6 +21,23 @@ pub fn build(b: *std.Build) void {
     // target and optimize options) will be listed when running `zig build --help`
     // in this directory.
 
+    // Read version and name from build.zig.zon
+    const zon = @import("build.zig.zon");
+    const name_str = @tagName(zon.name);
+    // Convert underscores to hyphens for display name (git_prs -> git-prs)
+    var display_name_buf: [64]u8 = undefined;
+    var display_name_len: usize = 0;
+    for (name_str) |c| {
+        display_name_buf[display_name_len] = if (c == '_') '-' else c;
+        display_name_len += 1;
+    }
+    const display_name = display_name_buf[0..display_name_len];
+
+    // Create build options module with version and name
+    const options = b.addOptions();
+    options.addOption([]const u8, "name", display_name);
+    options.addOption([]const u8, "version", zon.version);
+
     // This creates a module, which represents a collection of source files alongside
     // some compilation options, such as optimization mode and linked system libraries.
     // Zig modules are the preferred way of making Zig code available to consumers.
@@ -79,6 +96,7 @@ pub fn build(b: *std.Build) void {
                 // can be extremely useful in case of collisions (which can happen
                 // importing modules from different packages).
                 .{ .name = "git_prs", .module = mod },
+                .{ .name = "build_options", .module = options.createModule() },
             },
         }),
     });
