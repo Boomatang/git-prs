@@ -19,6 +19,8 @@ git-prs mine [OPTIONS]
 
 - `--org <name>` - Filter to a specific organization (case-insensitive). When omitted, shows PRs from all configured organizations in your `mine.orgs` list.
 - `--limit <n>` - Maximum number of PRs to display. Default: `50`. Must be a positive integer.
+- `--since <date>` - Only show PRs created on or after this date (YYYY-MM-DD).
+- `--until <date>` - Only show PRs created on or before this date (YYYY-MM-DD).
 - `--json` - Output results as a JSON array instead of formatted table. Useful for scripting and piping to other tools.
 
 **Description:**
@@ -33,18 +35,45 @@ List pull requests from your team members within a specific organization.
 
 **Syntax:**
 ```
-git-prs team [OPTIONS]
+git-prs team [name] [OPTIONS]
 ```
+
+The optional `name` argument selects a named team from your configuration. When omitted, uses the default team or requires `--org` if multiple teams exist.
 
 **Options:**
 
 - `--org <name>` - Specify which organization's team to query (case-insensitive). If you have only one team configured, this can be omitted and will be auto-selected. If you have multiple teams configured, this option is required.
 - `--member <username>` - Filter to a specific team member's PRs. When omitted, shows PRs from all team members.
+- `--since <date>` - Only show PRs created on or after this date (YYYY-MM-DD).
+- `--until <date>` - Only show PRs created on or before this date (YYYY-MM-DD).
 - `--json` - Output results as a JSON array instead of formatted table. Useful for scripting and piping to other tools.
 
 **Description:**
 
 Fetches and displays open pull requests from team members defined in your `~/.config/git-prs/config.json` file under the `team.<org>` field.
+
+---
+
+### `git-prs merged`
+
+List your recently merged pull requests.
+
+**Syntax:**
+```
+git-prs merged [OPTIONS]
+```
+
+**Options:**
+
+- `--days <n>` - How many days back to look (default: 7).
+- `--since <date>` - Start date in YYYY-MM-DD format.
+- `--until <date>` - End date in YYYY-MM-DD format.
+- `--org <name>` - Filter to a specific organization (case-insensitive).
+- `--json` - Output as JSON array.
+
+**Description:**
+
+Fetches and displays your recently merged pull requests from the organizations configured in your `~/.config/git-prs/config.json` file under the `mine.orgs` field.
 
 ---
 
@@ -61,6 +90,17 @@ git-prs -h
 **Description:**
 
 Prints a summary of available commands and their options. Running `git-prs` with no arguments also displays this help message.
+
+## Display Features
+
+### Terminal Width Detection
+The output automatically adapts to your terminal width. Columns are sized proportionally, and when the terminal is wide enough (typically 120+ characters), PR URLs are shown inline rather than on a separate line.
+
+### Draft PR Styling
+Draft pull requests are displayed with dim, italic text styling to visually distinguish them from regular PRs.
+
+### Dynamic Author Width
+The author column width adjusts based on the longest author name in the current result set.
 
 ## Examples
 
@@ -112,6 +152,44 @@ View only Alice's PRs:
 ```bash
 git-prs team --org my-company --member alice
 ```
+
+### Viewing Merged PRs
+
+View your recently merged PRs (last 7 days):
+```bash
+git-prs merged
+```
+
+View merged PRs from the last 30 days:
+```bash
+git-prs merged --days 30
+```
+
+View merged PRs in a date range:
+```bash
+git-prs merged --since 2025-01-01 --until 2025-01-31
+```
+
+### Date Filtering
+
+View PRs created in the last month:
+```bash
+git-prs mine --since 2025-02-14
+```
+
+View PRs created in a specific date range:
+```bash
+git-prs team --org kubernetes --since 2025-01-01 --until 2025-01-31
+```
+
+### Named Teams
+
+View PRs for a named team:
+```bash
+git-prs team platform
+```
+
+Named teams defined in config can span multiple organizations, making it easy to track cross-org teams.
 
 ### JSON Output for Scripting
 
@@ -258,4 +336,4 @@ The tool expects a configuration file at `~/.config/git-prs/config.json` with th
 - Authentication is handled via GitHub CLI (`gh`) - ensure you're logged in with `gh auth login`
 - Default limit is 50 PRs, but can be adjusted with `--limit`
 - JSON output format is designed to be compatible with standard JSON processing tools like `jq`
-- The tool only shows open pull requests (not closed or merged PRs)
+- The `mine` and `team` commands show only open pull requests, while the `merged` command shows recently merged PRs

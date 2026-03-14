@@ -6,7 +6,12 @@ A CLI tool to view your GitHub pull requests
 
 - **View your own open PRs** across multiple orgs (`mine` command)
 - **View team member PRs** for an org (`team` command)
+- **View merged PRs** - list your recently merged PRs (`merged` command)
+- **Date filtering** - filter PRs by date range with `--since` and `--until`
+- **Named teams** - define named teams that can span multiple organizations
 - **Display PR URLs** for easy browser access
+- **Draft PR styling** - draft PRs displayed with dim/italic styling for easy identification
+- **Adaptive display** - terminal width detection with inline URLs when space allows
 - **Case-insensitive org filtering** - match orgs regardless of capitalization
 - **JSON output for scripting** - use `--json` flag for machine-readable output
 - **Age and comment tracking** - see how old each PR is and comment counts
