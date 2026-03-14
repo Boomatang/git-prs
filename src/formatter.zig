@@ -7,6 +7,9 @@ pub const PullRequest = github.PullRequest;
 /// Minimum title width for inline URL display eligibility
 const MIN_TITLE_WIDTH: usize = 20;
 
+/// Minimum author width when truncation is required
+const MIN_AUTHOR_WIDTH: usize = 6;
+
 /// Check if URL fits inline with at least MIN_TITLE_WIDTH for the title.
 /// Returns the available title width if inline is eligible, or null if not.
 /// The 2-space separator between columns and URL is accounted for.
@@ -55,6 +58,17 @@ fn calcMaxIdentifierWidth(prs: []const PullRequest) usize {
         const id = std.fmt.bufPrint(&buf, "{s}/{s}#{d}", .{ pr.org, pr.repo, pr.number }) catch continue;
         if (id.len > max_width) {
             max_width = id.len;
+        }
+    }
+    return max_width;
+}
+
+/// Calculate the maximum author width needed for a list of PRs
+fn calcMaxAuthorWidth(prs: []const PullRequest) usize {
+    var max_width: usize = MIN_AUTHOR_WIDTH; // minimum for "AUTHOR" header
+    for (prs) |pr| {
+        if (pr.author.len > max_width) {
+            max_width = pr.author.len;
         }
     }
     return max_width;
@@ -145,10 +159,11 @@ fn formatTeamRow(
     current_time: i64,
     title_width: usize,
     identifier_width: usize,
+    author_width: usize,
     url_inline: bool,
 ) !void {
-    var author_buffer: [8]u8 = undefined;
-    const author = truncate(pr.author, 8, &author_buffer);
+    var author_buffer: [256]u8 = undefined;
+    const author = truncate(pr.author, author_width, &author_buffer);
 
     var identifier_buffer: [256]u8 = undefined;
     const identifier = try formatPRIdentifier(pr, &identifier_buffer);
@@ -165,11 +180,16 @@ fn formatTeamRow(
     else
         "-";
 
-    // Print author with fixed padding
-    try writer.print("{s: <8}  ", .{author});
+    // Print author with dynamic padding
+    try writer.writeAll(author);
+    var i: usize = author.len;
+    while (i < author_width) : (i += 1) {
+        try writer.writeByte(' ');
+    }
+    try writer.writeAll("  ");
     // Print identifier with dynamic padding
     try writer.writeAll(identifier);
-    var i: usize = identifier.len;
+    i = identifier.len;
     while (i < identifier_width) : (i += 1) {
         try writer.writeByte(' ');
     }
@@ -314,9 +334,25 @@ pub fn formatTeamOutput(
     // Calculate identifier width dynamically based on content
     const identifier_width = calcMaxIdentifierWidth(sorted_prs);
 
+    // Calculate max author width based on content
+    const max_author_width = calcMaxAuthorWidth(sorted_prs);
+
     const terminal_width = getTerminalWidth();
-    // Fixed columns for team view: AUTHOR(8) + 2 + identifier_width + 2 + AGE(5) + 2 + 👤(3) + 2 + LAST(5) + 2 = identifier_width + 31
-    const fixed_columns = identifier_width + 31;
+
+    // Calculate author width with truncation priority
+    // Required fixed space: identifier_width + spacing(2) + AGE(5) + spacing(2) + 👤(3) + spacing(2) + LAST(5) + spacing(2) = identifier_width + 21
+    const required_fixed = identifier_width + 21 + MIN_TITLE_WIDTH;
+    const available_for_author = if (terminal_width > required_fixed) terminal_width - required_fixed else 0;
+
+    const author_width = if (available_for_author >= max_author_width)
+        max_author_width
+    else if (available_for_author >= MIN_AUTHOR_WIDTH)
+        available_for_author
+    else
+        MIN_AUTHOR_WIDTH;
+
+    // Fixed columns for team view: author_width + 2 + identifier_width + 2 + AGE(5) + 2 + 👤(3) + 2 + LAST(5) + 2 = author_width + identifier_width + 23
+    const fixed_columns = author_width + 2 + identifier_width + 21;
 
     // Determine if we can use inline mode for ALL rows (based on longest URL)
     const max_url_len = calcMaxUrlLen(sorted_prs);
@@ -332,9 +368,14 @@ pub fn formatTeamOutput(
         MIN_TITLE_WIDTH;
     const title_width = @max(MIN_TITLE_WIDTH, @min(max_title_len, available_width));
 
-    // Print header with dynamic identifier column width
-    try writer.writeAll("AUTHOR    ORG/REPO#NUM");
-    var i: usize = 12; // "ORG/REPO#NUM" is 12 chars
+    // Print header with dynamic author and identifier column widths
+    try writer.writeAll("AUTHOR");
+    var i: usize = 6; // "AUTHOR" is 6 chars
+    while (i < author_width) : (i += 1) {
+        try writer.writeByte(' ');
+    }
+    try writer.writeAll("  ORG/REPO#NUM");
+    i = 12; // "ORG/REPO#NUM" is 12 chars
     while (i < identifier_width) : (i += 1) {
         try writer.writeByte(' ');
     }
@@ -350,7 +391,7 @@ pub fn formatTeamOutput(
     }
 
     // Print separator (use total row width)
-    const base_width = 8 + 2 + identifier_width + 2 + title_width + 2 + 5 + 4 + 3 + 4 + 5;
+    const base_width = author_width + 2 + identifier_width + 2 + title_width + 2 + 5 + 4 + 3 + 4 + 5;
     const total_width = if (use_inline) base_width + 2 + max_url_len else base_width;
     i = 0;
     while (i < total_width) : (i += 1) {
@@ -360,7 +401,7 @@ pub fn formatTeamOutput(
 
     // Print rows - all use the same format (inline or two-line)
     for (sorted_prs) |pr| {
-        try formatTeamRow(writer, pr, current_time, title_width, identifier_width, use_inline);
+        try formatTeamRow(writer, pr, current_time, title_width, identifier_width, author_width, use_inline);
     }
 }
 
@@ -681,6 +722,68 @@ test "calcMaxIdentifierWidth - minimum width" {
     try std.testing.expectEqual(@as(usize, 12), width);
 }
 
+test "calcMaxAuthorWidth - returns max author length" {
+    const prs = [_]PullRequest{
+        .{
+            .org = "org",
+            .repo = "repo",
+            .number = 1,
+            .title = "Test",
+            .url = "url",
+            .author = "bob",
+            .created_at = 0,
+            .last_comment_at = null,
+            .unique_commenters = 0,
+        },
+        .{
+            .org = "org",
+            .repo = "repo",
+            .number = 2,
+            .title = "Test",
+            .url = "url",
+            .author = "very-long-username",
+            .created_at = 0,
+            .last_comment_at = null,
+            .unique_commenters = 0,
+        },
+        .{
+            .org = "org",
+            .repo = "repo",
+            .number = 3,
+            .title = "Test",
+            .url = "url",
+            .author = "alice",
+            .created_at = 0,
+            .last_comment_at = null,
+            .unique_commenters = 0,
+        },
+    };
+
+    const width = calcMaxAuthorWidth(&prs);
+    // "very-long-username" = 18 chars
+    try std.testing.expectEqual(@as(usize, 18), width);
+}
+
+test "calcMaxAuthorWidth - minimum width" {
+    const prs = [_]PullRequest{
+        .{
+            .org = "org",
+            .repo = "repo",
+            .number = 1,
+            .title = "Test",
+            .url = "url",
+            .author = "bob",
+            .created_at = 0,
+            .last_comment_at = null,
+            .unique_commenters = 0,
+        },
+    };
+
+    const width = calcMaxAuthorWidth(&prs);
+    // "bob" = 3 chars, but minimum is 6 (header width)
+    try std.testing.expectEqual(@as(usize, 6), width);
+}
+
 test "formatMineOutput - empty list" {
     var buffer: std.ArrayListUnmanaged(u8) = .empty;
     defer buffer.deinit(std.testing.allocator);
@@ -930,7 +1033,7 @@ test "formatTeamRow - inline URL display" {
         .unique_commenters = 4,
     };
 
-    try formatTeamRow(buffer.writer(std.testing.allocator), pr, 1000, 30, 15, true);
+    try formatTeamRow(buffer.writer(std.testing.allocator), pr, 1000, 30, 15, 8, true);
 
     // URL should be on the same line (inline)
     var newline_count: usize = 0;
@@ -959,7 +1062,7 @@ test "formatTeamRow - two-line URL display" {
         .unique_commenters = 4,
     };
 
-    try formatTeamRow(buffer.writer(std.testing.allocator), pr, 1000, 30, 15, false);
+    try formatTeamRow(buffer.writer(std.testing.allocator), pr, 1000, 30, 15, 8, false);
 
     // URL should be on a separate line
     var newline_count: usize = 0;
@@ -1174,4 +1277,75 @@ test "calcMaxTitleWidth - empty list returns minimum" {
     const prs: []const PullRequest = &[_]PullRequest{};
     const width = calcMaxTitleWidth(prs);
     try std.testing.expectEqual(@as(usize, 5), width);
+}
+
+test "formatTeamRow - full author display when space available" {
+    var buffer: std.ArrayListUnmanaged(u8) = .empty;
+    defer buffer.deinit(std.testing.allocator);
+
+    const pr = PullRequest{
+        .org = "k8s",
+        .repo = "kube",
+        .number = 1234,
+        .title = "Fix node scheduling bug",
+        .url = "https://github.com/k8s/kube/pull/1234",
+        .author = "very-long-username",
+        .created_at = 100,
+        .last_comment_at = 900,
+        .unique_commenters = 4,
+    };
+
+    // Provide enough author_width to display full username
+    try formatTeamRow(buffer.writer(std.testing.allocator), pr, 1000, 30, 15, 18, false);
+
+    // Full author should be displayed without truncation
+    try std.testing.expect(std.mem.indexOf(u8, buffer.items, "very-long-username") != null);
+}
+
+test "formatTeamRow - author truncation when constrained" {
+    var buffer: std.ArrayListUnmanaged(u8) = .empty;
+    defer buffer.deinit(std.testing.allocator);
+
+    const pr = PullRequest{
+        .org = "k8s",
+        .repo = "kube",
+        .number = 1234,
+        .title = "Fix node scheduling bug",
+        .url = "https://github.com/k8s/kube/pull/1234",
+        .author = "very-long-username",
+        .created_at = 100,
+        .last_comment_at = 900,
+        .unique_commenters = 4,
+    };
+
+    // Constrain author_width to 10 chars
+    try formatTeamRow(buffer.writer(std.testing.allocator), pr, 1000, 30, 15, 10, false);
+
+    // Author should be truncated with "..."
+    try std.testing.expect(std.mem.indexOf(u8, buffer.items, "very-lo...") != null);
+    // Full username should NOT be present
+    try std.testing.expect(std.mem.indexOf(u8, buffer.items, "very-long-username") == null);
+}
+
+test "formatTeamRow - minimum author width preserved" {
+    var buffer: std.ArrayListUnmanaged(u8) = .empty;
+    defer buffer.deinit(std.testing.allocator);
+
+    const pr = PullRequest{
+        .org = "k8s",
+        .repo = "kube",
+        .number = 1234,
+        .title = "Fix node scheduling bug",
+        .url = "https://github.com/k8s/kube/pull/1234",
+        .author = "very-long-username",
+        .created_at = 100,
+        .last_comment_at = 900,
+        .unique_commenters = 4,
+    };
+
+    // Use minimum author_width of 6
+    try formatTeamRow(buffer.writer(std.testing.allocator), pr, 1000, 30, 15, 6, false);
+
+    // Author should be truncated to 6 chars: "ver..."
+    try std.testing.expect(std.mem.indexOf(u8, buffer.items, "ver...") != null);
 }
