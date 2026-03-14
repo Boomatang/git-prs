@@ -5,6 +5,7 @@ const cli = git_prs.cli;
 const config = git_prs.config;
 const github = git_prs.github;
 const formatter = git_prs.formatter;
+const time = git_prs.time;
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -38,6 +39,12 @@ pub fn main() !void {
             error.InvalidDateValue => {
                 _ = try stderr.write("Invalid date value. Must be in YYYY-MM-DD format.\n");
             },
+            error.DaysWithDateRange => {
+                _ = try stderr.write("Error: --days is mutually exclusive with --since or --until.\n");
+            },
+            error.InvalidDaysValue => {
+                _ = try stderr.write("Invalid days value. Must be a number.\n");
+            },
         }
         var buf: [4096]u8 = undefined;
         var fbs = std.io.fixedBufferStream(&buf);
@@ -59,6 +66,9 @@ pub fn main() !void {
         },
         .team => |team_args| {
             try runTeamCommand(allocator, stdout, stderr, team_args);
+        },
+        .merged => |merged_args| {
+            try runMergedCommand(allocator, stdout, stderr, merged_args);
         },
     }
 }
@@ -227,6 +237,72 @@ fn runTeamCommand(
         // Get current time for age calculations
         const current_time = std.time.timestamp();
         try formatter.formatTeamOutput(allocator, fbs.writer(), all_prs.items, current_time);
+    }
+    _ = try stdout.write(fbs.getWritten());
+}
+
+fn runMergedCommand(
+    allocator: std.mem.Allocator,
+    stdout: std.fs.File,
+    stderr: std.fs.File,
+    args: cli.MergedArgs,
+) !void {
+    // Load config
+    var cfg = config.loadConfig(allocator) catch |err| {
+        handleConfigError(err, stderr);
+        std.process.exit(1);
+    };
+    defer cfg.deinit();
+
+    // Initialize GitHub client
+    var client = github.Client.init(allocator, cfg.auth_token);
+    defer client.deinit();
+
+    // Get authenticated user (needed for @me queries)
+    const user = github.getAuthenticatedUser(&client) catch |err| {
+        handleGitHubError(err, stderr);
+        std.process.exit(1);
+    };
+    defer allocator.free(user);
+
+    // Determine date range
+    const days_to_use = args.days orelse 7; // default to 7 days
+    const since_date = if (args.since) |since|
+        since
+    else blk: {
+        const date = time.getDateDaysAgo(allocator, days_to_use) catch {
+            _ = stderr.write("Failed to calculate date range\n") catch {};
+            std.process.exit(1);
+        };
+        break :blk date;
+    };
+    defer {
+        if (args.since == null) {
+            allocator.free(since_date);
+        }
+    }
+
+    // Fetch merged PRs with date filters
+    const prs = github.fetchMergedPRs(&client, cfg.mine_orgs, args.org_filter, since_date, args.until) catch |err| {
+        handleGitHubError(err, stderr);
+        std.process.exit(1);
+    };
+    defer {
+        for (prs) |*pr| {
+            pr.deinit(allocator);
+        }
+        allocator.free(prs);
+    }
+
+    // Format and output using buffer
+    var output_buf: [65536]u8 = undefined;
+    var fbs = std.io.fixedBufferStream(&output_buf);
+
+    if (args.json) {
+        try formatter.formatJsonOutput(fbs.writer(), prs);
+    } else {
+        // Use plain URL output
+        try formatter.formatMergedUrlOutput(fbs.writer(), prs, days_to_use);
     }
     _ = try stdout.write(fbs.getWritten());
 }

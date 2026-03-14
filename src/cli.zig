@@ -17,9 +17,18 @@ pub const TeamArgs = struct {
     until: ?[]const u8 = null, // --until YYYY-MM-DD
 };
 
+pub const MergedArgs = struct {
+    days: ?u32 = null, // --days N for last N days (default 7 if no date flags)
+    org_filter: ?[]const u8 = null, // --org value or null
+    json: bool = false, // --json flag for JSON output
+    since: ?[]const u8 = null, // --since YYYY-MM-DD (mutually exclusive with --days)
+    until: ?[]const u8 = null, // --until YYYY-MM-DD (used with --since)
+};
+
 pub const Command = union(enum) {
     mine: MineArgs,
     team: TeamArgs,
+    merged: MergedArgs,
     help: void,
 };
 
@@ -29,6 +38,8 @@ pub const ParseError = error{
     MissingFlagValue,
     InvalidLimitValue,
     InvalidDateValue,
+    DaysWithDateRange,
+    InvalidDaysValue,
 };
 
 /// Parse command line arguments.
@@ -52,6 +63,8 @@ pub fn parseArgs(allocator: std.mem.Allocator, args: []const []const u8) ParseEr
         return .{ .mine = try parseMineArgs(args[1..]) };
     } else if (std.mem.eql(u8, command_name, "team")) {
         return .{ .team = try parseTeamArgs(args[1..]) };
+    } else if (std.mem.eql(u8, command_name, "merged")) {
+        return .{ .merged = try parseMergedArgs(args[1..]) };
     } else {
         return error.UnknownCommand;
     }
@@ -179,6 +192,64 @@ fn parseTeamArgs(args: []const []const u8) ParseError!TeamArgs {
     return result;
 }
 
+fn parseMergedArgs(args: []const []const u8) ParseError!MergedArgs {
+    var result = MergedArgs{};
+    var i: usize = 0;
+
+    while (i < args.len) {
+        const arg = args[i];
+
+        if (std.mem.eql(u8, arg, "--org")) {
+            i += 1;
+            if (i >= args.len) {
+                return error.MissingFlagValue;
+            }
+            result.org_filter = args[i];
+        } else if (std.mem.eql(u8, arg, "--days")) {
+            i += 1;
+            if (i >= args.len) {
+                return error.MissingFlagValue;
+            }
+            result.days = std.fmt.parseInt(u32, args[i], 10) catch {
+                return error.InvalidDaysValue;
+            };
+        } else if (std.mem.eql(u8, arg, "--json")) {
+            result.json = true;
+        } else if (std.mem.eql(u8, arg, "--since")) {
+            i += 1;
+            if (i >= args.len) {
+                return error.MissingFlagValue;
+            }
+            const date = args[i];
+            if (!isValidDateFormat(date)) {
+                return error.InvalidDateValue;
+            }
+            result.since = date;
+        } else if (std.mem.eql(u8, arg, "--until")) {
+            i += 1;
+            if (i >= args.len) {
+                return error.MissingFlagValue;
+            }
+            const date = args[i];
+            if (!isValidDateFormat(date)) {
+                return error.InvalidDateValue;
+            }
+            result.until = date;
+        } else {
+            return error.InvalidFlag;
+        }
+
+        i += 1;
+    }
+
+    // Validate: --days is mutually exclusive with --since or --until
+    if (result.days != null and (result.since != null or result.until != null)) {
+        return error.DaysWithDateRange;
+    }
+
+    return result;
+}
+
 /// Write usage information to the provided writer
 pub fn printUsage(writer: anytype) !void {
     try writer.writeAll(
@@ -190,6 +261,7 @@ pub fn printUsage(writer: anytype) !void {
         \\COMMANDS:
         \\    mine                   List PRs assigned to you
         \\    team [name]            List PRs for your team
+        \\    merged                 List merged PRs by you
         \\    --help, -h             Show this help message
         \\
         \\MINE OPTIONS:
@@ -207,6 +279,15 @@ pub fn printUsage(writer: anytype) !void {
         \\    --until <YYYY-MM-DD>   Only PRs created on or before this date (overrides config)
         \\    --json                 Output as JSON array
         \\
+        \\MERGED OPTIONS:
+        \\    --days <n>             Show PRs merged in last N days (default: 7)
+        \\    --since <YYYY-MM-DD>   Only PRs merged on or after this date
+        \\    --until <YYYY-MM-DD>   Only PRs merged on or before this date
+        \\    --org <name>           Filter to specific org (optional)
+        \\    --json                 Output as JSON array
+        \\
+        \\    Note: --days is mutually exclusive with --since/--until
+        \\
         \\EXAMPLES:
         \\    git-prs mine
         \\    git-prs mine --org kubernetes --limit 10
@@ -215,6 +296,9 @@ pub fn printUsage(writer: anytype) !void {
         \\    git-prs team release
         \\    git-prs team release --member alice
         \\    git-prs team traffic --since 2025-01-01 --until 2025-06-30
+        \\    git-prs merged
+        \\    git-prs merged --days 14
+        \\    git-prs merged --since 2025-01-01 --until 2025-06-30
         \\
     );
 }
@@ -487,4 +571,87 @@ test "missing date value returns error" {
 
     const result = parseArgs(allocator, &args);
     try std.testing.expectError(error.MissingFlagValue, result);
+}
+
+test "merged with no flags" {
+    const allocator = std.testing.allocator;
+    const args = [_][]const u8{"merged"};
+
+    const result = try parseArgs(allocator, &args);
+    try std.testing.expectEqual(Command.merged, std.meta.activeTag(result));
+    try std.testing.expectEqual(@as(?u32, null), result.merged.days);
+    try std.testing.expectEqual(@as(?[]const u8, null), result.merged.org_filter);
+    try std.testing.expect(!result.merged.json);
+}
+
+test "merged with --days flag" {
+    const allocator = std.testing.allocator;
+    const args = [_][]const u8{ "merged", "--days", "14" };
+
+    const result = try parseArgs(allocator, &args);
+    try std.testing.expectEqual(Command.merged, std.meta.activeTag(result));
+    try std.testing.expectEqual(@as(?u32, 14), result.merged.days);
+}
+
+test "merged with --org flag" {
+    const allocator = std.testing.allocator;
+    const args = [_][]const u8{ "merged", "--org", "kubernetes" };
+
+    const result = try parseArgs(allocator, &args);
+    try std.testing.expectEqual(Command.merged, std.meta.activeTag(result));
+    try std.testing.expectEqualStrings("kubernetes", result.merged.org_filter.?);
+}
+
+test "merged with --json flag" {
+    const allocator = std.testing.allocator;
+    const args = [_][]const u8{ "merged", "--json" };
+
+    const result = try parseArgs(allocator, &args);
+    try std.testing.expectEqual(Command.merged, std.meta.activeTag(result));
+    try std.testing.expect(result.merged.json);
+}
+
+test "merged with --since and --until" {
+    const allocator = std.testing.allocator;
+    const args = [_][]const u8{ "merged", "--since", "2025-01-01", "--until", "2025-06-30" };
+
+    const result = try parseArgs(allocator, &args);
+    try std.testing.expectEqual(Command.merged, std.meta.activeTag(result));
+    try std.testing.expectEqualStrings("2025-01-01", result.merged.since.?);
+    try std.testing.expectEqualStrings("2025-06-30", result.merged.until.?);
+}
+
+test "merged with --days and --since returns error" {
+    const allocator = std.testing.allocator;
+    const args = [_][]const u8{ "merged", "--days", "7", "--since", "2025-01-01" };
+
+    const result = parseArgs(allocator, &args);
+    try std.testing.expectError(error.DaysWithDateRange, result);
+}
+
+test "merged with --days and --until returns error" {
+    const allocator = std.testing.allocator;
+    const args = [_][]const u8{ "merged", "--days", "7", "--until", "2025-01-01" };
+
+    const result = parseArgs(allocator, &args);
+    try std.testing.expectError(error.DaysWithDateRange, result);
+}
+
+test "merged with invalid --days value" {
+    const allocator = std.testing.allocator;
+    const args = [_][]const u8{ "merged", "--days", "not-a-number" };
+
+    const result = parseArgs(allocator, &args);
+    try std.testing.expectError(error.InvalidDaysValue, result);
+}
+
+test "merged with all flags" {
+    const allocator = std.testing.allocator;
+    const args = [_][]const u8{ "merged", "--days", "30", "--org", "kubernetes", "--json" };
+
+    const result = try parseArgs(allocator, &args);
+    try std.testing.expectEqual(Command.merged, std.meta.activeTag(result));
+    try std.testing.expectEqual(@as(?u32, 30), result.merged.days);
+    try std.testing.expectEqualStrings("kubernetes", result.merged.org_filter.?);
+    try std.testing.expect(result.merged.json);
 }
