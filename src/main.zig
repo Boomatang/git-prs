@@ -35,6 +35,9 @@ pub fn main() !void {
             error.InvalidLimitValue => {
                 _ = try stderr.write("Invalid limit value. Must be a number.\n");
             },
+            error.InvalidDateValue => {
+                _ = try stderr.write("Invalid date value. Must be in YYYY-MM-DD format.\n");
+            },
         }
         var buf: [4096]u8 = undefined;
         var fbs = std.io.fixedBufferStream(&buf);
@@ -84,8 +87,8 @@ fn runMineCommand(
     };
     defer allocator.free(user);
 
-    // Fetch PRs
-    const prs = github.fetchUserPRs(&client, cfg.mine_orgs, args.org_filter, args.limit) catch |err| {
+    // Fetch PRs with date filters from CLI
+    const prs = github.fetchUserPRs(&client, cfg.mine_orgs, args.org_filter, args.limit, args.since, args.until) catch |err| {
         handleGitHubError(err, stderr);
         std.process.exit(1);
     };
@@ -157,7 +160,7 @@ fn runTeamCommand(
     };
 
     // Get team members for this org
-    const members = cfg.teams.get(org) orelse {
+    const team_config = cfg.teams.get(org) orelse {
         var buf: [256]u8 = undefined;
         const msg = std.fmt.bufPrint(&buf, "No team configured for org '{s}'\n", .{org}) catch "No team configured\n";
         _ = stderr.write(msg) catch {};
@@ -168,8 +171,12 @@ fn runTeamCommand(
     var client = github.Client.init(allocator, cfg.auth_token);
     defer client.deinit();
 
-    // Fetch PRs
-    const prs = github.fetchTeamPRs(&client, org, members, args.member_filter) catch |err| {
+    // Resolve effective dates: CLI overrides config
+    const effective_since = args.since orelse team_config.since;
+    const effective_until = args.until orelse team_config.until;
+
+    // Fetch PRs with date filters
+    const prs = github.fetchTeamPRs(&client, org, team_config.members, args.member_filter, effective_since, effective_until) catch |err| {
         handleGitHubError(err, stderr);
         std.process.exit(1);
     };
@@ -213,6 +220,9 @@ fn handleConfigError(err: anyerror, stderr: std.fs.File) void {
         },
         error.EmptyTeamMembers => {
             _ = stderr.write("Config error: team has no members listed\n") catch {};
+        },
+        error.InvalidDateFormat => {
+            _ = stderr.write("Config error: Invalid date format. Use YYYY-MM-DD format.\n") catch {};
         },
         error.GhNotInstalled => {
             // Error message already printed by config module

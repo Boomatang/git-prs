@@ -4,12 +4,16 @@ pub const MineArgs = struct {
     org_filter: ?[]const u8 = null, // --org value or null
     limit: u32 = 50, // --limit value, default 50
     json: bool = false, // --json flag for JSON output
+    since: ?[]const u8 = null, // --since YYYY-MM-DD
+    until: ?[]const u8 = null, // --until YYYY-MM-DD
 };
 
 pub const TeamArgs = struct {
     org: ?[]const u8 = null, // --org value (may be auto-selected if only one team configured)
     member_filter: ?[]const u8 = null, // --member value or null
     json: bool = false, // --json flag for JSON output
+    since: ?[]const u8 = null, // --since YYYY-MM-DD
+    until: ?[]const u8 = null, // --until YYYY-MM-DD
 };
 
 pub const Command = union(enum) {
@@ -23,6 +27,7 @@ pub const ParseError = error{
     InvalidFlag,
     MissingFlagValue,
     InvalidLimitValue,
+    InvalidDateValue,
 };
 
 /// Parse command line arguments.
@@ -51,6 +56,18 @@ pub fn parseArgs(allocator: std.mem.Allocator, args: []const []const u8) ParseEr
     }
 }
 
+/// Validate date format is YYYY-MM-DD
+fn isValidDateFormat(date_str: []const u8) bool {
+    if (date_str.len != 10) return false;
+    if (date_str[4] != '-' or date_str[7] != '-') return false;
+    _ = std.fmt.parseInt(u16, date_str[0..4], 10) catch return false;
+    const month = std.fmt.parseInt(u8, date_str[5..7], 10) catch return false;
+    const day = std.fmt.parseInt(u8, date_str[8..10], 10) catch return false;
+    if (month < 1 or month > 12) return false;
+    if (day < 1 or day > 31) return false;
+    return true;
+}
+
 fn parseMineArgs(args: []const []const u8) ParseError!MineArgs {
     var result = MineArgs{};
     var i: usize = 0;
@@ -74,6 +91,26 @@ fn parseMineArgs(args: []const []const u8) ParseError!MineArgs {
             };
         } else if (std.mem.eql(u8, arg, "--json")) {
             result.json = true;
+        } else if (std.mem.eql(u8, arg, "--since")) {
+            i += 1;
+            if (i >= args.len) {
+                return error.MissingFlagValue;
+            }
+            const date = args[i];
+            if (!isValidDateFormat(date)) {
+                return error.InvalidDateValue;
+            }
+            result.since = date;
+        } else if (std.mem.eql(u8, arg, "--until")) {
+            i += 1;
+            if (i >= args.len) {
+                return error.MissingFlagValue;
+            }
+            const date = args[i];
+            if (!isValidDateFormat(date)) {
+                return error.InvalidDateValue;
+            }
+            result.until = date;
         } else {
             return error.InvalidFlag;
         }
@@ -105,6 +142,26 @@ fn parseTeamArgs(args: []const []const u8) ParseError!TeamArgs {
             result.member_filter = args[i];
         } else if (std.mem.eql(u8, arg, "--json")) {
             result.json = true;
+        } else if (std.mem.eql(u8, arg, "--since")) {
+            i += 1;
+            if (i >= args.len) {
+                return error.MissingFlagValue;
+            }
+            const date = args[i];
+            if (!isValidDateFormat(date)) {
+                return error.InvalidDateValue;
+            }
+            result.since = date;
+        } else if (std.mem.eql(u8, arg, "--until")) {
+            i += 1;
+            if (i >= args.len) {
+                return error.MissingFlagValue;
+            }
+            const date = args[i];
+            if (!isValidDateFormat(date)) {
+                return error.InvalidDateValue;
+            }
+            result.until = date;
         } else {
             return error.InvalidFlag;
         }
@@ -131,18 +188,24 @@ pub fn printUsage(writer: anytype) !void {
         \\MINE OPTIONS:
         \\    --org <name>           Filter to specific org (optional)
         \\    --limit <n>            Max PRs to show (default: 50)
+        \\    --since <YYYY-MM-DD>   Only PRs created on or after this date
+        \\    --until <YYYY-MM-DD>   Only PRs created on or before this date
         \\    --json                 Output as JSON array
         \\
         \\TEAM OPTIONS:
         \\    --org <name>           Which org to check (auto-selected if only one configured)
         \\    --member <username>    Filter to specific team member (optional)
+        \\    --since <YYYY-MM-DD>   Only PRs created on or after this date (overrides config)
+        \\    --until <YYYY-MM-DD>   Only PRs created on or before this date (overrides config)
         \\    --json                 Output as JSON array
         \\
         \\EXAMPLES:
         \\    git-prs mine
         \\    git-prs mine --org kubernetes --limit 10
+        \\    git-prs mine --since 2025-01-01
         \\    git-prs team --org my-company
         \\    git-prs team --org my-company --member alice
+        \\    git-prs team --org my-company --since 2025-01-01 --until 2025-06-30
         \\
     );
 }
@@ -349,4 +412,70 @@ test "team with --org and --json flags" {
     try std.testing.expectEqual(Command.team, std.meta.activeTag(result));
     try std.testing.expectEqualStrings("my-company", result.team.org.?);
     try std.testing.expect(result.team.json);
+}
+
+test "mine with --since flag" {
+    const allocator = std.testing.allocator;
+    const args = [_][]const u8{ "mine", "--since", "2025-01-01" };
+
+    const result = try parseArgs(allocator, &args);
+    try std.testing.expectEqual(Command.mine, std.meta.activeTag(result));
+    try std.testing.expectEqualStrings("2025-01-01", result.mine.since.?);
+    try std.testing.expectEqual(@as(?[]const u8, null), result.mine.until);
+}
+
+test "mine with --until flag" {
+    const allocator = std.testing.allocator;
+    const args = [_][]const u8{ "mine", "--until", "2025-12-31" };
+
+    const result = try parseArgs(allocator, &args);
+    try std.testing.expectEqual(Command.mine, std.meta.activeTag(result));
+    try std.testing.expectEqual(@as(?[]const u8, null), result.mine.since);
+    try std.testing.expectEqualStrings("2025-12-31", result.mine.until.?);
+}
+
+test "mine with both --since and --until" {
+    const allocator = std.testing.allocator;
+    const args = [_][]const u8{ "mine", "--since", "2025-01-01", "--until", "2025-06-30" };
+
+    const result = try parseArgs(allocator, &args);
+    try std.testing.expectEqual(Command.mine, std.meta.activeTag(result));
+    try std.testing.expectEqualStrings("2025-01-01", result.mine.since.?);
+    try std.testing.expectEqualStrings("2025-06-30", result.mine.until.?);
+}
+
+test "team with --since flag" {
+    const allocator = std.testing.allocator;
+    const args = [_][]const u8{ "team", "--since", "2025-01-01" };
+
+    const result = try parseArgs(allocator, &args);
+    try std.testing.expectEqual(Command.team, std.meta.activeTag(result));
+    try std.testing.expectEqualStrings("2025-01-01", result.team.since.?);
+    try std.testing.expectEqual(@as(?[]const u8, null), result.team.until);
+}
+
+test "team with --until flag" {
+    const allocator = std.testing.allocator;
+    const args = [_][]const u8{ "team", "--until", "2025-12-31" };
+
+    const result = try parseArgs(allocator, &args);
+    try std.testing.expectEqual(Command.team, std.meta.activeTag(result));
+    try std.testing.expectEqual(@as(?[]const u8, null), result.team.since);
+    try std.testing.expectEqualStrings("2025-12-31", result.team.until.?);
+}
+
+test "invalid date format returns error" {
+    const allocator = std.testing.allocator;
+    const args = [_][]const u8{ "mine", "--since", "2025/01/01" };
+
+    const result = parseArgs(allocator, &args);
+    try std.testing.expectError(error.InvalidDateValue, result);
+}
+
+test "missing date value returns error" {
+    const allocator = std.testing.allocator;
+    const args = [_][]const u8{ "mine", "--since" };
+
+    const result = parseArgs(allocator, &args);
+    try std.testing.expectError(error.MissingFlagValue, result);
 }

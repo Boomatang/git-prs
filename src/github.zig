@@ -76,6 +76,8 @@ pub fn fetchUserPRs(
     orgs: []const []const u8,
     org_filter: ?[]const u8,
     limit: u32,
+    since: ?[]const u8,
+    until: ?[]const u8,
 ) GitHubError![]PullRequest {
     var all_prs: std.ArrayListUnmanaged(PullRequest) = .empty;
     errdefer {
@@ -94,7 +96,7 @@ pub fn fetchUserPRs(
         }
 
         const remaining = limit - @as(u32, @intCast(all_prs.items.len));
-        const prs = try fetchPRsWithGh(client, org, null, remaining);
+        const prs = try fetchPRsWithGh(client, org, null, remaining, since, until);
         defer client.allocator.free(prs);
 
         for (prs) |pr| {
@@ -114,6 +116,8 @@ pub fn fetchTeamPRs(
     org: []const u8,
     members: []const []const u8,
     member_filter: ?[]const u8,
+    since: ?[]const u8,
+    until: ?[]const u8,
 ) GitHubError![]PullRequest {
     var all_prs: std.ArrayListUnmanaged(PullRequest) = .empty;
     errdefer {
@@ -131,7 +135,7 @@ pub fn fetchTeamPRs(
             }
         }
 
-        const prs = try fetchPRsForAuthor(client, org, member);
+        const prs = try fetchPRsForAuthor(client, org, member, since, until);
         defer client.allocator.free(prs);
 
         for (prs) |pr| {
@@ -151,12 +155,34 @@ fn fetchPRsWithGh(
     org: []const u8,
     author: ?[]const u8,
     limit: u32,
+    since: ?[]const u8,
+    until: ?[]const u8,
 ) GitHubError![]PullRequest {
     // Build search query for GraphQL
-    const search_query = if (author) |a|
+    const base_query = if (author) |a|
         try std.fmt.allocPrint(client.allocator, "is:pr is:open author:{s} org:{s}", .{ a, org })
     else
         try std.fmt.allocPrint(client.allocator, "is:pr is:open author:@me org:{s}", .{org});
+    defer client.allocator.free(base_query);
+
+    // Append date filters if provided
+    const search_query = if (since != null or until != null) blk: {
+        const since_filter = if (since) |s|
+            try std.fmt.allocPrint(client.allocator, " created:>={s}", .{s})
+        else
+            try std.fmt.allocPrint(client.allocator, "", .{});
+        defer client.allocator.free(since_filter);
+
+        const until_filter = if (until) |u|
+            try std.fmt.allocPrint(client.allocator, " created:<={s}", .{u})
+        else
+            try std.fmt.allocPrint(client.allocator, "", .{});
+        defer client.allocator.free(until_filter);
+
+        break :blk try std.fmt.allocPrint(client.allocator, "{s}{s}{s}", .{ base_query, since_filter, until_filter });
+    } else base_query: {
+        break :base_query try client.allocator.dupe(u8, base_query);
+    };
     defer client.allocator.free(search_query);
 
     // Build GraphQL query
@@ -213,8 +239,10 @@ fn fetchPRsForAuthor(
     client: *Client,
     org: []const u8,
     author: []const u8,
+    since: ?[]const u8,
+    until: ?[]const u8,
 ) GitHubError![]PullRequest {
-    return fetchPRsWithGh(client, org, author, 100);
+    return fetchPRsWithGh(client, org, author, 100, since, until);
 }
 
 fn parseGraphQLResponse(allocator: std.mem.Allocator, json_data: []const u8) GitHubError![]PullRequest {
