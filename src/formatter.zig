@@ -86,6 +86,8 @@ fn formatMineRow(
         pr.unique_commenters,
         last,
     });
+    // Print URL on second line with 4-space indent
+    try writer.print("    {s}\n", .{pr.url});
 }
 
 /// Format a single PR row for team view
@@ -134,6 +136,8 @@ fn formatTeamRow(
         pr.unique_commenters,
         last,
     });
+    // Print URL on second line with 4-space indent
+    try writer.print("    {s}\n", .{pr.url});
 }
 
 /// Sort PRs by age descending (newest first)
@@ -512,6 +516,8 @@ test "formatMineOutput - single PR" {
     try std.testing.expect(std.mem.indexOf(u8, buffer.items, "k8s/kube#1234") != null);
     try std.testing.expect(std.mem.indexOf(u8, buffer.items, "Fix node scheduling bug") != null);
     try std.testing.expect(std.mem.indexOf(u8, buffer.items, "ORG/REPO#NUM") != null);
+    // Check that URL appears on second line with 4-space indent
+    try std.testing.expect(std.mem.indexOf(u8, buffer.items, "    https://github.com/k8s/kube/pull/1234") != null);
 }
 
 test "formatTeamOutput - single PR" {
@@ -539,6 +545,8 @@ test "formatTeamOutput - single PR" {
     try std.testing.expect(std.mem.indexOf(u8, buffer.items, "k8s/kube#1234") != null);
     try std.testing.expect(std.mem.indexOf(u8, buffer.items, "Fix node scheduling bug") != null);
     try std.testing.expect(std.mem.indexOf(u8, buffer.items, "AUTHOR") != null);
+    // Check that URL appears on second line with 4-space indent
+    try std.testing.expect(std.mem.indexOf(u8, buffer.items, "    https://github.com/k8s/kube/pull/1234") != null);
 }
 
 test "formatMineOutput - long identifiers not truncated" {
