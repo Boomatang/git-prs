@@ -122,14 +122,15 @@ fn runTeamCommand(
     // Determine which org to use
     const org = blk: {
         if (args.org) |specified_org| {
-            // User specified an org, verify it exists in config
-            if (!cfg.teams.contains(specified_org)) {
+            // User specified an org, verify it exists in config (case-insensitive)
+            const matched_org = findTeamKeyCaseInsensitive(cfg.teams, specified_org);
+            if (matched_org == null) {
                 var buf: [256]u8 = undefined;
                 const msg = std.fmt.bufPrint(&buf, "No team configured for org '{s}'\n", .{specified_org}) catch "No team configured\n";
                 _ = stderr.write(msg) catch {};
                 std.process.exit(1);
             }
-            break :blk specified_org;
+            break :blk matched_org.?;
         } else {
             // Auto-select if only one team configured
             const team_count = cfg.teams.count();
@@ -215,6 +216,36 @@ fn handleConfigError(err: anyerror, stderr: std.fs.File) void {
             _ = stderr.write("Failed to load config\n") catch {};
         },
     }
+}
+
+/// Find a team config key case-insensitively
+/// Returns the actual key from the config if a case-insensitive match is found
+fn findTeamKeyCaseInsensitive(teams: anytype, search_key: []const u8) ?[]const u8 {
+    var it = teams.iterator();
+    while (it.next()) |entry| {
+        if (std.ascii.eqlIgnoreCase(entry.key_ptr.*, search_key)) {
+            return entry.key_ptr.*;
+        }
+    }
+    return null;
+}
+
+test "findTeamKeyCaseInsensitive - matches case-insensitively" {
+    var teams = std.StringHashMap([]const []const u8).init(std.testing.allocator);
+    defer teams.deinit();
+
+    const members: []const []const u8 = &.{"alice"};
+    try teams.put("Kubernetes", members);
+
+    // Should match with different casings
+    try std.testing.expectEqualStrings("Kubernetes", findTeamKeyCaseInsensitive(teams, "kubernetes").?);
+    try std.testing.expectEqualStrings("Kubernetes", findTeamKeyCaseInsensitive(teams, "KUBERNETES").?);
+    try std.testing.expectEqualStrings("Kubernetes", findTeamKeyCaseInsensitive(teams, "KuBeRnEtEs").?);
+    try std.testing.expectEqualStrings("Kubernetes", findTeamKeyCaseInsensitive(teams, "Kubernetes").?);
+
+    // Should not match different string
+    try std.testing.expectEqual(@as(?[]const u8, null), findTeamKeyCaseInsensitive(teams, "kubernetess"));
+    try std.testing.expectEqual(@as(?[]const u8, null), findTeamKeyCaseInsensitive(teams, "openshift"));
 }
 
 fn handleGitHubError(err: anyerror, stderr: std.fs.File) void {

@@ -86,9 +86,9 @@ pub fn fetchUserPRs(
     }
 
     for (orgs) |org| {
-        // Apply org filter if specified
+        // Apply org filter if specified (case-insensitive)
         if (org_filter) |filter| {
-            if (!std.mem.eql(u8, org, filter)) {
+            if (!std.ascii.eqlIgnoreCase(org, filter)) {
                 continue;
             }
         }
@@ -428,4 +428,24 @@ test "Client init and deinit" {
 
     try std.testing.expectEqual(allocator, client.allocator);
     try std.testing.expectEqualStrings(token, client.auth_token);
+}
+
+test "org filter comparison is case-insensitive" {
+    // Verify that std.ascii.eqlIgnoreCase works as expected for org matching
+    // This mirrors the logic used in fetchUserPRs
+    const org = "Kubernetes";
+    const filter_lower = "kubernetes";
+    const filter_upper = "KUBERNETES";
+    const filter_mixed = "KuBeRnEtEs";
+    const filter_exact = "Kubernetes";
+    const filter_wrong = "kubernetess";
+
+    // Case-insensitive matches should succeed
+    try std.testing.expect(std.ascii.eqlIgnoreCase(org, filter_lower));
+    try std.testing.expect(std.ascii.eqlIgnoreCase(org, filter_upper));
+    try std.testing.expect(std.ascii.eqlIgnoreCase(org, filter_mixed));
+    try std.testing.expect(std.ascii.eqlIgnoreCase(org, filter_exact));
+
+    // Different string should not match
+    try std.testing.expect(!std.ascii.eqlIgnoreCase(org, filter_wrong));
 }
