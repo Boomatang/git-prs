@@ -315,6 +315,7 @@ fn fetchMergedPRsWithGh(
         \\        title
         \\        url
         \\        createdAt
+        \\        isDraft
         \\        author {{ login }}
         \\        repository {{
         \\          name
