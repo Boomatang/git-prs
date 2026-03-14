@@ -152,24 +152,51 @@ fn fetchPRsWithGh(
     author: ?[]const u8,
     limit: u32,
 ) GitHubError![]PullRequest {
-    // Build search query
+    // Build search query for GraphQL
     const search_query = if (author) |a|
         try std.fmt.allocPrint(client.allocator, "is:pr is:open author:{s} org:{s}", .{ a, org })
     else
         try std.fmt.allocPrint(client.allocator, "is:pr is:open author:@me org:{s}", .{org});
     defer client.allocator.free(search_query);
 
-    const limit_str = try std.fmt.allocPrint(client.allocator, "{d}", .{limit});
-    defer client.allocator.free(limit_str);
+    // Build GraphQL query
+    const graphql_query = try std.fmt.allocPrint(client.allocator,
+        \\query {{
+        \\  search(query: "{s}", type: ISSUE, first: {d}) {{
+        \\    nodes {{
+        \\      ... on PullRequest {{
+        \\        number
+        \\        title
+        \\        url
+        \\        createdAt
+        \\        author {{ login }}
+        \\        repository {{
+        \\          name
+        \\          owner {{ login }}
+        \\        }}
+        \\        comments(last: 100) {{
+        \\          nodes {{
+        \\            author {{ login }}
+        \\            createdAt
+        \\          }}
+        \\        }}
+        \\      }}
+        \\    }}
+        \\  }}
+        \\}}
+    , .{ search_query, limit });
+    defer client.allocator.free(graphql_query);
 
-    // Use gh search to fetch PRs
+    // Build the query parameter
+    const query_param = try std.fmt.allocPrint(client.allocator, "query={s}", .{graphql_query});
+    defer client.allocator.free(query_param);
+
+    // Use gh api graphql to fetch PRs
     const result = std.process.Child.run(.{
         .allocator = client.allocator,
         .argv = &.{
-            "gh", "search", "prs",
-            search_query,
-            "--json", "number,title,url,author,repository,createdAt,comments",
-            "--limit", limit_str,
+            "gh", "api", "graphql",
+            "-f", query_param,
         },
     }) catch return error.GhCommandFailed;
     defer client.allocator.free(result.stdout);
@@ -179,7 +206,7 @@ fn fetchPRsWithGh(
         return error.GhCommandFailed;
     }
 
-    return try parsePRsFromJson(client.allocator, result.stdout);
+    return try parseGraphQLResponse(client.allocator, result.stdout);
 }
 
 fn fetchPRsForAuthor(
@@ -190,7 +217,7 @@ fn fetchPRsForAuthor(
     return fetchPRsWithGh(client, org, author, 100);
 }
 
-fn parsePRsFromJson(allocator: std.mem.Allocator, json_data: []const u8) GitHubError![]PullRequest {
+fn parseGraphQLResponse(allocator: std.mem.Allocator, json_data: []const u8) GitHubError![]PullRequest {
     const parsed = std.json.parseFromSlice(
         std.json.Value,
         allocator,
@@ -199,9 +226,14 @@ fn parsePRsFromJson(allocator: std.mem.Allocator, json_data: []const u8) GitHubE
     ) catch return error.ParseError;
     defer parsed.deinit();
 
-    if (parsed.value != .array) {
-        return error.ParseError;
-    }
+    // Navigate: data.search.nodes
+    if (parsed.value != .object) return error.ParseError;
+    const data = parsed.value.object.get("data") orelse return error.ParseError;
+    if (data != .object) return error.ParseError;
+    const search = data.object.get("search") orelse return error.ParseError;
+    if (search != .object) return error.ParseError;
+    const nodes = search.object.get("nodes") orelse return error.ParseError;
+    if (nodes != .array) return error.ParseError;
 
     var prs: std.ArrayListUnmanaged(PullRequest) = .empty;
     errdefer {
@@ -211,24 +243,23 @@ fn parsePRsFromJson(allocator: std.mem.Allocator, json_data: []const u8) GitHubE
         prs.deinit(allocator);
     }
 
-    for (parsed.value.array.items) |item| {
+    for (nodes.array.items) |item| {
         if (item != .object) continue;
 
-        const pr = try parsePullRequestFromGh(allocator, item.object);
+        const pr = try parsePullRequestFromGraphQL(allocator, item.object);
         try prs.append(allocator, pr);
     }
 
     return prs.toOwnedSlice(allocator);
 }
 
-fn parsePullRequestFromGh(allocator: std.mem.Allocator, obj: std.json.ObjectMap) GitHubError!PullRequest {
+fn parsePullRequestFromGraphQL(allocator: std.mem.Allocator, obj: std.json.ObjectMap) GitHubError!PullRequest {
     const number = obj.get("number") orelse return error.ParseError;
     const title = obj.get("title") orelse return error.ParseError;
     const url = obj.get("url") orelse return error.ParseError;
     const created_at_str = obj.get("createdAt") orelse return error.ParseError;
     const author_obj = obj.get("author") orelse return error.ParseError;
     const repository = obj.get("repository") orelse return error.ParseError;
-    const comments = obj.get("comments");
 
     // Parse author
     const author_str = if (author_obj == .null)
@@ -236,41 +267,40 @@ fn parsePullRequestFromGh(allocator: std.mem.Allocator, obj: std.json.ObjectMap)
     else if (author_obj == .object) blk: {
         const login = author_obj.object.get("login") orelse return error.ParseError;
         break :blk login.string;
-    } else if (author_obj == .string)
-        author_obj.string
-    else
+    } else
         return error.ParseError;
 
     // Parse repository
+    if (repository != .object) return error.ParseError;
     const repo_obj = repository.object;
     const owner = repo_obj.get("owner") orelse return error.ParseError;
     const repo_name = repo_obj.get("name") orelse return error.ParseError;
 
-    const owner_login = if (owner == .object)
-        owner.object.get("login") orelse return error.ParseError
-    else if (owner == .string)
-        owner
-    else
-        return error.ParseError;
+    if (owner != .object) return error.ParseError;
+    const owner_login = owner.object.get("login") orelse return error.ParseError;
 
     // Parse timestamps
     const created_at = try parseIso8601Timestamp(created_at_str.string);
 
-    // Analyze comments
+    // Analyze comments from GraphQL response
     var last_comment_at: ?i64 = null;
     var unique_commenters: u32 = 0;
 
-    if (comments) |c| {
-        if (c == .array) {
-            const analysis = try analyzeComments(allocator, c, author_str);
-            last_comment_at = analysis.last_comment_at;
-            unique_commenters = analysis.unique_commenters;
+    if (obj.get("comments")) |comments_obj| {
+        if (comments_obj == .object) {
+            if (comments_obj.object.get("nodes")) |comment_nodes| {
+                if (comment_nodes == .array) {
+                    const analysis = analyzeComments(allocator, comment_nodes.array, author_str);
+                    last_comment_at = analysis.last_comment_at;
+                    unique_commenters = analysis.unique_commenters;
+                }
+            }
         }
     }
 
     return .{
-        .org = try allocator.dupe(u8, if (owner_login == .string) owner_login.string else owner_login.object.get("login").?.string),
-        .repo = try allocator.dupe(u8, if (repo_name == .string) repo_name.string else repo_name.object.get("name").?.string),
+        .org = try allocator.dupe(u8, owner_login.string),
+        .repo = try allocator.dupe(u8, repo_name.string),
         .number = @intCast(number.integer),
         .title = try allocator.dupe(u8, title.string),
         .url = try allocator.dupe(u8, url.string),
@@ -288,29 +318,26 @@ const CommentAnalysis = struct {
 
 fn analyzeComments(
     allocator: std.mem.Allocator,
-    comments_value: std.json.Value,
+    comments: std.json.Array,
     pr_author: []const u8,
-) !CommentAnalysis {
+) CommentAnalysis {
     var last_timestamp: ?i64 = null;
     var commenter_set = std.StringHashMap(void).init(allocator);
     defer commenter_set.deinit();
 
-    for (comments_value.array.items) |comment_node| {
+    for (comments.items) |comment_node| {
         if (comment_node != .object) continue;
 
         const comment = comment_node.object;
-
         const author_obj = comment.get("author") orelse continue;
         const created_at_str = comment.get("createdAt") orelse continue;
 
-        const author_str = if (author_obj == .null)
+        const comment_author = if (author_obj == .null)
             "ghost"
         else if (author_obj == .object) blk: {
             const login = author_obj.object.get("login") orelse continue;
             break :blk login.string;
-        } else if (author_obj == .string)
-            author_obj.string
-        else
+        } else
             continue;
 
         const timestamp = parseIso8601Timestamp(created_at_str.string) catch continue;
@@ -321,8 +348,8 @@ fn analyzeComments(
         }
 
         // Add to unique commenters set (excluding PR author)
-        if (!std.mem.eql(u8, author_str, pr_author)) {
-            try commenter_set.put(author_str, {});
+        if (!std.mem.eql(u8, comment_author, pr_author)) {
+            commenter_set.put(comment_author, {}) catch {};
         }
     }
 
