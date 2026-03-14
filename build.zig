@@ -171,4 +171,74 @@ pub fn build(b: *std.Build) void {
     //
     // Lastly, the Zig build system is relatively simple and self-contained,
     // and reading its source code will allow you to master it.
+
+    // Release Artifacts Build Step
+    // Define cross-compilation targets
+    const targets: []const std.Target.Query = &.{
+        .{ .cpu_arch = .x86_64, .os_tag = .linux },
+        .{ .cpu_arch = .aarch64, .os_tag = .linux },
+        .{ .cpu_arch = .x86_64, .os_tag = .macos },
+        .{ .cpu_arch = .aarch64, .os_tag = .macos },
+    };
+
+    // Create top-level artifacts step
+    const artifacts_step = b.step("artifacts", "Build release artifacts for all targets");
+
+    for (targets) |t| {
+        // Determine OS and architecture strings for naming
+        const os_str = if (t.os_tag.? == .linux) "linux" else "macos";
+        const arch_str = if (t.cpu_arch.? == .x86_64) "x86_64" else "aarch64";
+
+        // Create cross-compiled executable with ReleaseSmall optimization
+        const cross_exe = b.addExecutable(.{
+            .name = name_str,
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/main.zig"),
+                .target = b.resolveTargetQuery(t),
+                .optimize = .ReleaseSmall,
+                .imports = &.{
+                    .{ .name = "git_prs", .module = mod },
+                    .{ .name = "build_options", .module = options.createModule() },
+                },
+            }),
+        });
+
+        // Install the executable - this returns the installed file path
+        const install_exe = b.addInstallArtifact(cross_exe, .{});
+
+        // Create archive name: git_prs-{version}-{os}-{arch}.tar.gz
+        const archive_name = b.fmt("{s}-{s}-{s}-{s}.tar.gz", .{ name_str, zon.version, os_str, arch_str });
+
+        // Create mkdir command to ensure artifacts directory exists
+        const mkdir_cmd = b.addSystemCommand(&.{
+            "mkdir",
+            "-p",
+            "zig-out/artifacts",
+        });
+
+        // Create tar archive using system tar command
+        // The executable will be in the archive as just "git_prs" (no subdirectory)
+        const tar_cmd = b.addSystemCommand(&.{
+            "tar",
+            "-czf",
+        });
+        tar_cmd.addArg(b.fmt("zig-out/artifacts/{s}", .{archive_name}));
+        tar_cmd.addArg("--transform");
+        tar_cmd.addArg("s|.*/||");
+        tar_cmd.addFileArg(install_exe.emitted_bin.?);
+        tar_cmd.step.dependOn(&install_exe.step);
+        tar_cmd.step.dependOn(&mkdir_cmd.step);
+
+        // Create SHA256 checksum using sha256sum
+        // Format: <hash>  <filename> (two spaces)
+        const checksum_cmd = b.addSystemCommand(&.{
+            "sh",
+            "-c",
+            b.fmt("cd zig-out/artifacts && sha256sum {s} > {s}.sha256", .{ archive_name, archive_name }),
+        });
+        checksum_cmd.step.dependOn(&tar_cmd.step);
+
+        // Add this target's checksum step to the artifacts step
+        artifacts_step.dependOn(&checksum_cmd.step);
+    }
 }
