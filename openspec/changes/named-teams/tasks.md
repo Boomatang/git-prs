@@ -51,7 +51,7 @@
 ## 7. Verification
 
 - [x] 7.1 Run full test suite
-- [ ] 7.2 Manual test with single team config
-- [ ] 7.3 Manual test with multiple teams and default
-- [ ] 7.4 Manual test with explicit team name argument
-- [ ] 7.5 Manual test error cases (missing team, no default)
+- [x] 7.2 Manual test with single team config
+- [x] 7.3 Manual test with multiple teams and default
+- [x] 7.4 Manual test with explicit team name argument
+- [x] 7.5 Manual test error cases (missing team, no default)

@@ -26,5 +26,5 @@
 ## 4. Verification
 
 - [x] 4.1 Run full test suite
-- [ ] 4.2 Manual test with `./zig-out/bin/git_prs team` on wide terminal
-- [ ] 4.3 Manual test with narrow terminal to verify truncation priority
+- [x] 4.2 Manual test with `./zig-out/bin/git_prs team` on wide terminal
+- [x] 4.3 Manual test with narrow terminal to verify truncation priority
