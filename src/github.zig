@@ -14,6 +14,7 @@ pub const PullRequest = struct {
     created_at: i64, // unix timestamp
     last_comment_at: ?i64, // null if no comments
     unique_commenters: u32, // count excluding PR author
+    is_draft: bool,
 
     pub fn deinit(self: *const PullRequest, allocator: std.mem.Allocator) void {
         allocator.free(self.org);
@@ -146,6 +147,41 @@ pub fn fetchTeamPRs(
     return all_prs.toOwnedSlice(client.allocator);
 }
 
+/// Fetch merged PRs authored by authenticated user in specified orgs
+pub fn fetchMergedPRs(
+    client: *Client,
+    orgs: []const []const u8,
+    org_filter: ?[]const u8,
+    since: []const u8,
+    until: ?[]const u8,
+) GitHubError![]PullRequest {
+    var all_prs: std.ArrayListUnmanaged(PullRequest) = .empty;
+    errdefer {
+        for (all_prs.items) |*pr| {
+            pr.deinit(client.allocator);
+        }
+        all_prs.deinit(client.allocator);
+    }
+
+    for (orgs) |org| {
+        // Apply org filter if specified (case-insensitive)
+        if (org_filter) |filter| {
+            if (!std.ascii.eqlIgnoreCase(org, filter)) {
+                continue;
+            }
+        }
+
+        const prs = try fetchMergedPRsWithGh(client, org, since, until);
+        defer client.allocator.free(prs);
+
+        for (prs) |pr| {
+            try all_prs.append(client.allocator, pr);
+        }
+    }
+
+    return all_prs.toOwnedSlice(client.allocator);
+}
+
 // ============================================================================
 // Internal Helper Functions
 // ============================================================================
@@ -195,6 +231,7 @@ fn fetchPRsWithGh(
         \\        title
         \\        url
         \\        createdAt
+        \\        isDraft
         \\        author {{ login }}
         \\        repository {{
         \\          name
@@ -245,6 +282,79 @@ fn fetchPRsForAuthor(
     return fetchPRsWithGh(client, org, author, 100, since, until);
 }
 
+fn fetchMergedPRsWithGh(
+    client: *Client,
+    org: []const u8,
+    since: []const u8,
+    until: ?[]const u8,
+) GitHubError![]PullRequest {
+    // Build search query for merged PRs
+    const base_query = try std.fmt.allocPrint(client.allocator, "is:pr is:merged author:@me org:{s}", .{org});
+    defer client.allocator.free(base_query);
+
+    // Add merged date filters
+    const since_filter = try std.fmt.allocPrint(client.allocator, " merged:>={s}", .{since});
+    defer client.allocator.free(since_filter);
+
+    const until_filter = if (until) |u|
+        try std.fmt.allocPrint(client.allocator, " merged:<={s}", .{u})
+    else
+        try std.fmt.allocPrint(client.allocator, "", .{});
+    defer client.allocator.free(until_filter);
+
+    const search_query = try std.fmt.allocPrint(client.allocator, "{s}{s}{s}", .{ base_query, since_filter, until_filter });
+    defer client.allocator.free(search_query);
+
+    // Build GraphQL query
+    const graphql_query = try std.fmt.allocPrint(client.allocator,
+        \\query {{
+        \\  search(query: "{s}", type: ISSUE, first: 100) {{
+        \\    nodes {{
+        \\      ... on PullRequest {{
+        \\        number
+        \\        title
+        \\        url
+        \\        createdAt
+        \\        author {{ login }}
+        \\        repository {{
+        \\          name
+        \\          owner {{ login }}
+        \\        }}
+        \\        comments(last: 100) {{
+        \\          nodes {{
+        \\            author {{ login }}
+        \\            createdAt
+        \\          }}
+        \\        }}
+        \\      }}
+        \\    }}
+        \\  }}
+        \\}}
+    , .{search_query});
+    defer client.allocator.free(graphql_query);
+
+    // Build the query parameter
+    const query_param = try std.fmt.allocPrint(client.allocator, "query={s}", .{graphql_query});
+    defer client.allocator.free(query_param);
+
+    // Use gh api graphql to fetch PRs
+    const result = std.process.Child.run(.{
+        .allocator = client.allocator,
+        .argv = &.{
+            "gh", "api", "graphql",
+            "-f", query_param,
+        },
+    }) catch return error.GhCommandFailed;
+    defer client.allocator.free(result.stdout);
+    defer client.allocator.free(result.stderr);
+
+    if (result.term.Exited != 0) {
+        return error.GhCommandFailed;
+    }
+
+    return try parseGraphQLResponse(client.allocator, result.stdout);
+}
+
 fn parseGraphQLResponse(allocator: std.mem.Allocator, json_data: []const u8) GitHubError![]PullRequest {
     const parsed = std.json.parseFromSlice(
         std.json.Value,
@@ -286,6 +396,7 @@ fn parsePullRequestFromGraphQL(allocator: std.mem.Allocator, obj: std.json.Objec
     const title = obj.get("title") orelse return error.ParseError;
     const url = obj.get("url") orelse return error.ParseError;
     const created_at_str = obj.get("createdAt") orelse return error.ParseError;
+    const is_draft_value = obj.get("isDraft") orelse return error.ParseError;
     const author_obj = obj.get("author") orelse return error.ParseError;
     const repository = obj.get("repository") orelse return error.ParseError;
 
@@ -309,6 +420,9 @@ fn parsePullRequestFromGraphQL(allocator: std.mem.Allocator, obj: std.json.Objec
 
     // Parse timestamps
     const created_at = try parseIso8601Timestamp(created_at_str.string);
+
+    // Parse is_draft boolean
+    const is_draft = if (is_draft_value == .bool) is_draft_value.bool else false;
 
     // Analyze comments from GraphQL response
     var last_comment_at: ?i64 = null;
@@ -336,6 +450,7 @@ fn parsePullRequestFromGraphQL(allocator: std.mem.Allocator, obj: std.json.Objec
         .created_at = created_at,
         .last_comment_at = last_comment_at,
         .unique_commenters = unique_commenters,
+        .is_draft = is_draft,
     };
 }
 

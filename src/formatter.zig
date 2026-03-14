@@ -10,6 +10,16 @@ const MIN_TITLE_WIDTH: usize = 20;
 /// Minimum author width when truncation is required
 const MIN_AUTHOR_WIDTH: usize = 6;
 
+/// ANSI escape codes for draft PR styling
+const ANSI_DIM_ITALIC = "\x1b[2;3m";
+const ANSI_RESET = "\x1b[0m";
+
+/// Check if stdout is a TTY (terminal)
+pub fn isStdoutTty() bool {
+    const stdout = std.fs.File.stdout();
+    return std.posix.isatty(stdout.handle);
+}
+
 /// Check if URL fits inline with at least MIN_TITLE_WIDTH for the title.
 /// Returns the available title width if inline is eligible, or null if not.
 /// The 2-space separator between columns and URL is accounted for.
@@ -104,7 +114,13 @@ fn formatMineRow(
     title_width: usize,
     identifier_width: usize,
     url_inline: bool,
+    is_tty: bool,
 ) !void {
+    // Apply ANSI codes for draft PRs when outputting to TTY
+    if (pr.is_draft and is_tty) {
+        try writer.writeAll(ANSI_DIM_ITALIC);
+    }
+
     var identifier_buffer: [256]u8 = undefined;
     const identifier = try formatPRIdentifier(pr, &identifier_buffer);
 
@@ -135,19 +151,30 @@ fn formatMineRow(
     }
     if (url_inline) {
         // Print URL inline with 2-space separator after LAST column
-        try writer.print("  {s: >5}  {d: >3}  {s: >5}  {s}\n", .{
+        try writer.print("  {s: >5}  {d: >3}  {s: >5}  {s}", .{
             age,
             pr.unique_commenters,
             last,
             pr.url,
         });
     } else {
-        try writer.print("  {s: >5}  {d: >3}  {s: >5}\n", .{
+        try writer.print("  {s: >5}  {d: >3}  {s: >5}", .{
             age,
             pr.unique_commenters,
             last,
         });
-        // Print URL on second line with 4-space indent
+    }
+
+    // Reset ANSI codes for draft PRs
+    if (pr.is_draft and is_tty) {
+        try writer.writeAll(ANSI_RESET);
+    }
+
+    // Complete the line
+    try writer.writeAll("\n");
+
+    // If not inline, print URL on second line (never styled with ANSI)
+    if (!url_inline) {
         try writer.print("    {s}\n", .{pr.url});
     }
 }
@@ -161,7 +188,13 @@ fn formatTeamRow(
     identifier_width: usize,
     author_width: usize,
     url_inline: bool,
+    is_tty: bool,
 ) !void {
+    // Apply ANSI codes for draft PRs when outputting to TTY
+    if (pr.is_draft and is_tty) {
+        try writer.writeAll(ANSI_DIM_ITALIC);
+    }
+
     var author_buffer: [256]u8 = undefined;
     const author = truncate(pr.author, author_width, &author_buffer);
 
@@ -202,19 +235,30 @@ fn formatTeamRow(
     }
     if (url_inline) {
         // Print URL inline with 2-space separator after LAST column
-        try writer.print("  {s: >5}  {d: >3}  {s: >5}  {s}\n", .{
+        try writer.print("  {s: >5}  {d: >3}  {s: >5}  {s}", .{
             age,
             pr.unique_commenters,
             last,
             pr.url,
         });
     } else {
-        try writer.print("  {s: >5}  {d: >3}  {s: >5}\n", .{
+        try writer.print("  {s: >5}  {d: >3}  {s: >5}", .{
             age,
             pr.unique_commenters,
             last,
         });
-        // Print URL on second line with 4-space indent
+    }
+
+    // Reset ANSI codes for draft PRs
+    if (pr.is_draft and is_tty) {
+        try writer.writeAll(ANSI_RESET);
+    }
+
+    // Complete the line
+    try writer.writeAll("\n");
+
+    // If not inline, print URL on second line (never styled with ANSI)
+    if (!url_inline) {
         try writer.print("    {s}\n", .{pr.url});
     }
 }
@@ -308,9 +352,12 @@ pub fn formatMineOutput(
     }
     try writer.print("\n", .{});
 
+    // Detect TTY for ANSI styling
+    const is_tty = isStdoutTty();
+
     // Print rows - all use the same format (inline or two-line)
     for (sorted_prs) |pr| {
-        try formatMineRow(writer, pr, current_time, title_width, identifier_width, use_inline);
+        try formatMineRow(writer, pr, current_time, title_width, identifier_width, use_inline, is_tty);
     }
 }
 
@@ -399,9 +446,12 @@ pub fn formatTeamOutput(
     }
     try writer.print("\n", .{});
 
+    // Detect TTY for ANSI styling
+    const is_tty = isStdoutTty();
+
     // Print rows - all use the same format (inline or two-line)
     for (sorted_prs) |pr| {
-        try formatTeamRow(writer, pr, current_time, title_width, identifier_width, author_width, use_inline);
+        try formatTeamRow(writer, pr, current_time, title_width, identifier_width, author_width, use_inline, is_tty);
     }
 }
 
@@ -458,6 +508,8 @@ fn formatPrAsJson(writer: anytype, pr: PullRequest) !void {
 
     try writer.print(",\"unique_commenters\":{d}", .{pr.unique_commenters});
 
+    try writer.print(",\"is_draft\":{s}", .{if (pr.is_draft) "true" else "false"});
+
     try writer.writeAll("}");
 }
 
@@ -476,6 +528,22 @@ pub fn formatJsonOutput(
     }
 
     try writer.writeAll("]\n");
+}
+
+/// Format merged PRs as plain URL output (one URL per line)
+pub fn formatMergedUrlOutput(
+    writer: anytype,
+    prs: []const PullRequest,
+    days: u32,
+) !void {
+    if (prs.len == 0) {
+        try writer.print("No PRs merged in the last {d} days\n", .{days});
+        return;
+    }
+
+    for (prs) |pr| {
+        try writer.print("{s}\n", .{pr.url});
+    }
 }
 
 // Tests
@@ -555,6 +623,7 @@ test "sortByAge - sorts newest first" {
             .created_at = 1000,
             .last_comment_at = null,
             .unique_commenters = 0,
+            .is_draft = false,
         },
         .{
             .org = "org2",
@@ -566,6 +635,7 @@ test "sortByAge - sorts newest first" {
             .created_at = 500,
             .last_comment_at = null,
             .unique_commenters = 0,
+            .is_draft = false,
         },
         .{
             .org = "org3",
@@ -577,6 +647,7 @@ test "sortByAge - sorts newest first" {
             .created_at = 1500,
             .last_comment_at = null,
             .unique_commenters = 0,
+            .is_draft = false,
         },
     };
 
@@ -599,6 +670,7 @@ test "sortByAuthorThenAge - sorts by author then age" {
             .created_at = 1000,
             .last_comment_at = null,
             .unique_commenters = 0,
+            .is_draft = false,
         },
         .{
             .org = "org2",
@@ -610,6 +682,7 @@ test "sortByAuthorThenAge - sorts by author then age" {
             .created_at = 500,
             .last_comment_at = null,
             .unique_commenters = 0,
+            .is_draft = false,
         },
         .{
             .org = "org3",
@@ -621,6 +694,7 @@ test "sortByAuthorThenAge - sorts by author then age" {
             .created_at = 800,
             .last_comment_at = null,
             .unique_commenters = 0,
+            .is_draft = false,
         },
     };
 
@@ -644,6 +718,7 @@ test "formatPRIdentifier - short identifier" {
         .created_at = 0,
         .last_comment_at = null,
         .unique_commenters = 0,
+        .is_draft = false,
     };
 
     var buffer: [256]u8 = undefined;
@@ -662,6 +737,7 @@ test "formatPRIdentifier - long identifier not truncated" {
         .created_at = 0,
         .last_comment_at = null,
         .unique_commenters = 0,
+        .is_draft = false,
     };
 
     var buffer: [256]u8 = undefined;
@@ -683,6 +759,7 @@ test "calcMaxIdentifierWidth - returns max width" {
             .created_at = 0,
             .last_comment_at = null,
             .unique_commenters = 0,
+            .is_draft = false,
         },
         .{
             .org = "very-long-organization",
@@ -694,6 +771,7 @@ test "calcMaxIdentifierWidth - returns max width" {
             .created_at = 0,
             .last_comment_at = null,
             .unique_commenters = 0,
+            .is_draft = false,
         },
     };
 
@@ -714,6 +792,7 @@ test "calcMaxIdentifierWidth - minimum width" {
             .created_at = 0,
             .last_comment_at = null,
             .unique_commenters = 0,
+            .is_draft = false,
         },
     };
 
@@ -734,6 +813,7 @@ test "calcMaxAuthorWidth - returns max author length" {
             .created_at = 0,
             .last_comment_at = null,
             .unique_commenters = 0,
+            .is_draft = false,
         },
         .{
             .org = "org",
@@ -745,6 +825,7 @@ test "calcMaxAuthorWidth - returns max author length" {
             .created_at = 0,
             .last_comment_at = null,
             .unique_commenters = 0,
+            .is_draft = false,
         },
         .{
             .org = "org",
@@ -756,6 +837,7 @@ test "calcMaxAuthorWidth - returns max author length" {
             .created_at = 0,
             .last_comment_at = null,
             .unique_commenters = 0,
+            .is_draft = false,
         },
     };
 
@@ -776,6 +858,7 @@ test "calcMaxAuthorWidth - minimum width" {
             .created_at = 0,
             .last_comment_at = null,
             .unique_commenters = 0,
+            .is_draft = false,
         },
     };
 
@@ -819,6 +902,7 @@ test "formatMineOutput - single PR" {
             .created_at = 100,
             .last_comment_at = 900,
             .unique_commenters = 4,
+            .is_draft = false,
         },
     };
 
@@ -847,6 +931,7 @@ test "formatTeamOutput - single PR" {
             .created_at = 100,
             .last_comment_at = 900,
             .unique_commenters = 4,
+            .is_draft = false,
         },
     };
 
@@ -876,6 +961,7 @@ test "formatMineOutput - long identifiers not truncated" {
             .created_at = 100,
             .last_comment_at = null,
             .unique_commenters = 0,
+            .is_draft = false,
         },
     };
 
@@ -900,6 +986,7 @@ test "formatJsonOutput - single PR" {
             .created_at = 1705322096,
             .last_comment_at = 1705400000,
             .unique_commenters = 4,
+            .is_draft = false,
         },
     };
 
@@ -971,9 +1058,10 @@ test "formatMineRow - inline URL display" {
         .created_at = 100,
         .last_comment_at = 900,
         .unique_commenters = 4,
+        .is_draft = false,
     };
 
-    try formatMineRow(buffer.writer(std.testing.allocator), pr, 1000, 30, 15, true);
+    try formatMineRow(buffer.writer(std.testing.allocator), pr, 1000, 30, 15, true, false);
 
     // URL should be on the same line (inline), not on a separate line
     // Check there's only one newline (single line output)
@@ -1001,9 +1089,10 @@ test "formatMineRow - two-line URL display" {
         .created_at = 100,
         .last_comment_at = 900,
         .unique_commenters = 4,
+        .is_draft = false,
     };
 
-    try formatMineRow(buffer.writer(std.testing.allocator), pr, 1000, 30, 15, false);
+    try formatMineRow(buffer.writer(std.testing.allocator), pr, 1000, 30, 15, false, false);
 
     // URL should be on a separate line with 4-space indent
     // Check there are two newlines (two line output)
@@ -1031,9 +1120,10 @@ test "formatTeamRow - inline URL display" {
         .created_at = 100,
         .last_comment_at = 900,
         .unique_commenters = 4,
+        .is_draft = false,
     };
 
-    try formatTeamRow(buffer.writer(std.testing.allocator), pr, 1000, 30, 15, 8, true);
+    try formatTeamRow(buffer.writer(std.testing.allocator), pr, 1000, 30, 15, 8, true, false);
 
     // URL should be on the same line (inline)
     var newline_count: usize = 0;
@@ -1060,9 +1150,10 @@ test "formatTeamRow - two-line URL display" {
         .created_at = 100,
         .last_comment_at = 900,
         .unique_commenters = 4,
+        .is_draft = false,
     };
 
-    try formatTeamRow(buffer.writer(std.testing.allocator), pr, 1000, 30, 15, 8, false);
+    try formatTeamRow(buffer.writer(std.testing.allocator), pr, 1000, 30, 15, 8, false, false);
 
     // URL should be on a separate line
     var newline_count: usize = 0;
@@ -1126,9 +1217,10 @@ test "formatMineRow - URL never truncated in inline mode" {
         .created_at = 100,
         .last_comment_at = null,
         .unique_commenters = 0,
+        .is_draft = false,
     };
 
-    try formatMineRow(buffer.writer(std.testing.allocator), pr, 1000, 20, 12, true);
+    try formatMineRow(buffer.writer(std.testing.allocator), pr, 1000, 20, 12, true, false);
 
     // Full URL should appear without truncation
     try std.testing.expect(std.mem.indexOf(u8, buffer.items, long_url) != null);
@@ -1149,9 +1241,10 @@ test "formatMineRow - URL never truncated in two-line mode" {
         .created_at = 100,
         .last_comment_at = null,
         .unique_commenters = 0,
+        .is_draft = false,
     };
 
-    try formatMineRow(buffer.writer(std.testing.allocator), pr, 1000, 20, 12, false);
+    try formatMineRow(buffer.writer(std.testing.allocator), pr, 1000, 20, 12, false, false);
 
     // Full URL should appear without truncation
     try std.testing.expect(std.mem.indexOf(u8, buffer.items, long_url) != null);
@@ -1178,6 +1271,7 @@ test "formatMineOutput - header includes URL column in inline mode" {
             .created_at = 100,
             .last_comment_at = null,
             .unique_commenters = 0,
+            .is_draft = false,
         },
     };
 
@@ -1207,6 +1301,7 @@ test "formatTeamOutput - header includes URL column in inline mode" {
             .created_at = 100,
             .last_comment_at = null,
             .unique_commenters = 0,
+            .is_draft = false,
         },
     };
 
@@ -1234,6 +1329,7 @@ test "calcMaxTitleWidth - returns max title length" {
             .created_at = 0,
             .last_comment_at = null,
             .unique_commenters = 0,
+            .is_draft = false,
         },
         .{
             .org = "org",
@@ -1245,6 +1341,7 @@ test "calcMaxTitleWidth - returns max title length" {
             .created_at = 0,
             .last_comment_at = null,
             .unique_commenters = 0,
+            .is_draft = false,
         },
     };
 
@@ -1265,6 +1362,7 @@ test "calcMaxTitleWidth - minimum width is 5 (TITLE header)" {
             .created_at = 0,
             .last_comment_at = null,
             .unique_commenters = 0,
+            .is_draft = false,
         },
     };
 
@@ -1293,10 +1391,11 @@ test "formatTeamRow - full author display when space available" {
         .created_at = 100,
         .last_comment_at = 900,
         .unique_commenters = 4,
+        .is_draft = false,
     };
 
     // Provide enough author_width to display full username
-    try formatTeamRow(buffer.writer(std.testing.allocator), pr, 1000, 30, 15, 18, false);
+    try formatTeamRow(buffer.writer(std.testing.allocator), pr, 1000, 30, 15, 18, false, false);
 
     // Full author should be displayed without truncation
     try std.testing.expect(std.mem.indexOf(u8, buffer.items, "very-long-username") != null);
@@ -1316,10 +1415,11 @@ test "formatTeamRow - author truncation when constrained" {
         .created_at = 100,
         .last_comment_at = 900,
         .unique_commenters = 4,
+        .is_draft = false,
     };
 
     // Constrain author_width to 10 chars
-    try formatTeamRow(buffer.writer(std.testing.allocator), pr, 1000, 30, 15, 10, false);
+    try formatTeamRow(buffer.writer(std.testing.allocator), pr, 1000, 30, 15, 10, false, false);
 
     // Author should be truncated with "..."
     try std.testing.expect(std.mem.indexOf(u8, buffer.items, "very-lo...") != null);
@@ -1341,11 +1441,239 @@ test "formatTeamRow - minimum author width preserved" {
         .created_at = 100,
         .last_comment_at = 900,
         .unique_commenters = 4,
+        .is_draft = false,
     };
 
     // Use minimum author_width of 6
-    try formatTeamRow(buffer.writer(std.testing.allocator), pr, 1000, 30, 15, 6, false);
+    try formatTeamRow(buffer.writer(std.testing.allocator), pr, 1000, 30, 15, 6, false, false);
 
     // Author should be truncated to 6 chars: "ver..."
     try std.testing.expect(std.mem.indexOf(u8, buffer.items, "ver...") != null);
+}
+
+test "formatMergedUrlOutput - empty list shows message" {
+    var buffer: std.ArrayListUnmanaged(u8) = .empty;
+    defer buffer.deinit(std.testing.allocator);
+
+    const prs: []const PullRequest = &[_]PullRequest{};
+    try formatMergedUrlOutput(buffer.writer(std.testing.allocator), prs, 7);
+
+    try std.testing.expectEqualStrings("No PRs merged in the last 7 days\n", buffer.items);
+}
+
+test "formatMergedUrlOutput - single PR outputs URL only" {
+    var buffer: std.ArrayListUnmanaged(u8) = .empty;
+    defer buffer.deinit(std.testing.allocator);
+
+    const prs = [_]PullRequest{
+        .{
+            .org = "k8s",
+            .repo = "kube",
+            .number = 1234,
+            .title = "Fix bug",
+            .url = "https://github.com/k8s/kube/pull/1234",
+            .author = "alice",
+            .created_at = 100,
+            .last_comment_at = null,
+            .unique_commenters = 0,
+            .is_draft = false,
+        },
+    };
+
+    try formatMergedUrlOutput(buffer.writer(std.testing.allocator), &prs, 7);
+
+    try std.testing.expectEqualStrings("https://github.com/k8s/kube/pull/1234\n", buffer.items);
+}
+
+test "formatMergedUrlOutput - multiple PRs output URLs on separate lines" {
+    var buffer: std.ArrayListUnmanaged(u8) = .empty;
+    defer buffer.deinit(std.testing.allocator);
+
+    const prs = [_]PullRequest{
+        .{
+            .org = "k8s",
+            .repo = "kube",
+            .number = 1234,
+            .title = "Fix bug 1",
+            .url = "https://github.com/k8s/kube/pull/1234",
+            .author = "alice",
+            .created_at = 100,
+            .last_comment_at = null,
+            .unique_commenters = 0,
+            .is_draft = false,
+        },
+        .{
+            .org = "k8s",
+            .repo = "kube",
+            .number = 5678,
+            .title = "Fix bug 2",
+            .url = "https://github.com/k8s/kube/pull/5678",
+            .author = "bob",
+            .created_at = 200,
+            .last_comment_at = null,
+            .unique_commenters = 0,
+            .is_draft = false,
+        },
+    };
+
+    try formatMergedUrlOutput(buffer.writer(std.testing.allocator), &prs, 7);
+
+    const expected =
+        \\https://github.com/k8s/kube/pull/1234
+        \\https://github.com/k8s/kube/pull/5678
+        \\
+    ;
+    try std.testing.expectEqualStrings(expected, buffer.items);
+}
+
+test "formatMergedUrlOutput - respects days parameter in message" {
+    var buffer: std.ArrayListUnmanaged(u8) = .empty;
+    defer buffer.deinit(std.testing.allocator);
+
+    const prs: []const PullRequest = &[_]PullRequest{};
+    try formatMergedUrlOutput(buffer.writer(std.testing.allocator), prs, 14);
+
+    try std.testing.expectEqualStrings("No PRs merged in the last 14 days\n", buffer.items);
+}
+
+test "isStdoutTty - returns boolean" {
+    // This test verifies that isStdoutTty() returns a boolean value
+    // The actual value depends on execution context (terminal vs piped)
+    const is_tty = isStdoutTty();
+    // Just verify it's a boolean (true or false)
+    _ = is_tty;
+}
+
+test "formatMineRow - draft PR with TTY includes ANSI codes" {
+    var buffer: std.ArrayListUnmanaged(u8) = .empty;
+    defer buffer.deinit(std.testing.allocator);
+
+    const pr = PullRequest{
+        .org = "k8s",
+        .repo = "kube",
+        .number = 1234,
+        .title = "Fix node scheduling bug",
+        .url = "https://github.com/k8s/kube/pull/1234",
+        .author = "alice",
+        .created_at = 100,
+        .last_comment_at = 900,
+        .unique_commenters = 4,
+        .is_draft = true,
+    };
+
+    try formatMineRow(buffer.writer(std.testing.allocator), pr, 1000, 30, 15, false, true);
+
+    // Should contain ANSI codes for dim+italic
+    try std.testing.expect(std.mem.indexOf(u8, buffer.items, ANSI_DIM_ITALIC) != null);
+    try std.testing.expect(std.mem.indexOf(u8, buffer.items, ANSI_RESET) != null);
+}
+
+test "formatMineRow - draft PR without TTY has no ANSI codes" {
+    var buffer: std.ArrayListUnmanaged(u8) = .empty;
+    defer buffer.deinit(std.testing.allocator);
+
+    const pr = PullRequest{
+        .org = "k8s",
+        .repo = "kube",
+        .number = 1234,
+        .title = "Fix node scheduling bug",
+        .url = "https://github.com/k8s/kube/pull/1234",
+        .author = "alice",
+        .created_at = 100,
+        .last_comment_at = 900,
+        .unique_commenters = 4,
+        .is_draft = true,
+    };
+
+    try formatMineRow(buffer.writer(std.testing.allocator), pr, 1000, 30, 15, false, false);
+
+    // Should NOT contain ANSI codes when not TTY
+    try std.testing.expect(std.mem.indexOf(u8, buffer.items, ANSI_DIM_ITALIC) == null);
+    try std.testing.expect(std.mem.indexOf(u8, buffer.items, ANSI_RESET) == null);
+}
+
+test "formatTeamRow - draft PR with TTY includes ANSI codes" {
+    var buffer: std.ArrayListUnmanaged(u8) = .empty;
+    defer buffer.deinit(std.testing.allocator);
+
+    const pr = PullRequest{
+        .org = "k8s",
+        .repo = "kube",
+        .number = 1234,
+        .title = "Fix node scheduling bug",
+        .url = "https://github.com/k8s/kube/pull/1234",
+        .author = "alice",
+        .created_at = 100,
+        .last_comment_at = 900,
+        .unique_commenters = 4,
+        .is_draft = true,
+    };
+
+    try formatTeamRow(buffer.writer(std.testing.allocator), pr, 1000, 30, 15, 8, false, true);
+
+    // Should contain ANSI codes for dim+italic
+    try std.testing.expect(std.mem.indexOf(u8, buffer.items, ANSI_DIM_ITALIC) != null);
+    try std.testing.expect(std.mem.indexOf(u8, buffer.items, ANSI_RESET) != null);
+}
+
+test "formatTeamRow - draft PR without TTY has no ANSI codes" {
+    var buffer: std.ArrayListUnmanaged(u8) = .empty;
+    defer buffer.deinit(std.testing.allocator);
+
+    const pr = PullRequest{
+        .org = "k8s",
+        .repo = "kube",
+        .number = 1234,
+        .title = "Fix node scheduling bug",
+        .url = "https://github.com/k8s/kube/pull/1234",
+        .author = "alice",
+        .created_at = 100,
+        .last_comment_at = 900,
+        .unique_commenters = 4,
+        .is_draft = true,
+    };
+
+    try formatTeamRow(buffer.writer(std.testing.allocator), pr, 1000, 30, 15, 8, false, false);
+
+    // Should NOT contain ANSI codes when not TTY
+    try std.testing.expect(std.mem.indexOf(u8, buffer.items, ANSI_DIM_ITALIC) == null);
+    try std.testing.expect(std.mem.indexOf(u8, buffer.items, ANSI_RESET) == null);
+}
+
+test "formatJsonOutput - includes is_draft field" {
+    var buffer: std.ArrayListUnmanaged(u8) = .empty;
+    defer buffer.deinit(std.testing.allocator);
+
+    const prs = [_]PullRequest{
+        .{
+            .org = "k8s",
+            .repo = "kube",
+            .number = 1234,
+            .title = "Fix node scheduling bug",
+            .url = "https://github.com/k8s/kube/pull/1234",
+            .author = "alice",
+            .created_at = 1705322096,
+            .last_comment_at = 1705400000,
+            .unique_commenters = 4,
+            .is_draft = true,
+        },
+        .{
+            .org = "k8s",
+            .repo = "kube",
+            .number = 5678,
+            .title = "Add new feature",
+            .url = "https://github.com/k8s/kube/pull/5678",
+            .author = "bob",
+            .created_at = 1705322100,
+            .last_comment_at = null,
+            .unique_commenters = 0,
+            .is_draft = false,
+        },
+    };
+
+    try formatJsonOutput(buffer.writer(std.testing.allocator), &prs);
+
+    // Check that is_draft appears for both PRs with correct values
+    try std.testing.expect(std.mem.indexOf(u8, buffer.items, "\"is_draft\":true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buffer.items, "\"is_draft\":false") != null);
 }
