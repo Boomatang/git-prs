@@ -4,6 +4,23 @@ const github = @import("github.zig");
 
 pub const PullRequest = github.PullRequest;
 
+/// Minimum title width for inline URL display eligibility
+const MIN_TITLE_WIDTH: usize = 20;
+
+/// Check if URL fits inline with at least MIN_TITLE_WIDTH for the title.
+/// Returns the available title width if inline is eligible, or null if not.
+/// The 2-space separator between columns and URL is accounted for.
+fn urlFitsInline(terminal_width: u32, fixed_columns: usize, url_len: usize) ?usize {
+    const url_space_needed = url_len + 2; // URL + 2-space separator
+    const total_fixed = fixed_columns + url_space_needed;
+    if (terminal_width <= total_fixed) return null;
+    const available_for_title = terminal_width - total_fixed;
+    if (available_for_title >= MIN_TITLE_WIDTH) {
+        return available_for_title;
+    }
+    return null;
+}
+
 /// Get terminal width using ioctl, falling back to COLUMNS env var, then 80
 pub fn getTerminalWidth() u32 {
     // Try ioctl-based detection first
@@ -61,6 +78,7 @@ fn formatMineRow(
     current_time: i64,
     title_width: usize,
     identifier_width: usize,
+    url_inline: bool,
 ) !void {
     var identifier_buffer: [256]u8 = undefined;
     const identifier = try formatPRIdentifier(pr, &identifier_buffer);
@@ -90,13 +108,23 @@ fn formatMineRow(
     while (i < title_width) : (i += 1) {
         try writer.writeByte(' ');
     }
-    try writer.print("  {s: >5}  {d: >3}  {s: >5}\n", .{
-        age,
-        pr.unique_commenters,
-        last,
-    });
-    // Print URL on second line with 4-space indent
-    try writer.print("    {s}\n", .{pr.url});
+    if (url_inline) {
+        // Print URL inline with 2-space separator after LAST column
+        try writer.print("  {s: >5}  {d: >3}  {s: >5}  {s}\n", .{
+            age,
+            pr.unique_commenters,
+            last,
+            pr.url,
+        });
+    } else {
+        try writer.print("  {s: >5}  {d: >3}  {s: >5}\n", .{
+            age,
+            pr.unique_commenters,
+            last,
+        });
+        // Print URL on second line with 4-space indent
+        try writer.print("    {s}\n", .{pr.url});
+    }
 }
 
 /// Format a single PR row for team view
@@ -106,6 +134,7 @@ fn formatTeamRow(
     current_time: i64,
     title_width: usize,
     identifier_width: usize,
+    url_inline: bool,
 ) !void {
     var author_buffer: [8]u8 = undefined;
     const author = truncate(pr.author, 8, &author_buffer);
@@ -140,13 +169,23 @@ fn formatTeamRow(
     while (i < title_width) : (i += 1) {
         try writer.writeByte(' ');
     }
-    try writer.print("  {s: >5}  {d: >3}  {s: >5}\n", .{
-        age,
-        pr.unique_commenters,
-        last,
-    });
-    // Print URL on second line with 4-space indent
-    try writer.print("    {s}\n", .{pr.url});
+    if (url_inline) {
+        // Print URL inline with 2-space separator after LAST column
+        try writer.print("  {s: >5}  {d: >3}  {s: >5}  {s}\n", .{
+            age,
+            pr.unique_commenters,
+            last,
+            pr.url,
+        });
+    } else {
+        try writer.print("  {s: >5}  {d: >3}  {s: >5}\n", .{
+            age,
+            pr.unique_commenters,
+            last,
+        });
+        // Print URL on second line with 4-space indent
+        try writer.print("    {s}\n", .{pr.url});
+    }
 }
 
 /// Sort PRs by age descending (newest first)
@@ -161,6 +200,17 @@ fn sortByAuthorThenAge(_: void, a: PullRequest, b: PullRequest) bool {
         return a.created_at > b.created_at;
     }
     return author_cmp == .lt;
+}
+
+/// Calculate the maximum URL length across all PRs
+fn calcMaxUrlLen(prs: []const PullRequest) usize {
+    var max_len: usize = 0;
+    for (prs) |pr| {
+        if (pr.url.len > max_len) {
+            max_len = pr.url.len;
+        }
+    }
+    return max_len;
 }
 
 /// Format PRs for the mine command output
@@ -183,11 +233,21 @@ pub fn formatMineOutput(
     // Calculate identifier width dynamically based on content
     const identifier_width = calcMaxIdentifierWidth(sorted_prs);
 
-    // Calculate title width
     const terminal_width = getTerminalWidth();
-    // Fixed columns: AGE(5) + 👤(3) + LAST(5) + spaces(8) = 21, plus dynamic identifier
-    const fixed_width: usize = 21 + identifier_width;
-    const title_width = if (terminal_width > fixed_width) terminal_width - fixed_width else 20;
+    // Fixed columns for mine view: identifier_width + 2 + AGE(5) + 2 + 👤(3) + 2 + LAST(5) + 2 = identifier_width + 21
+    const fixed_columns = identifier_width + 21;
+
+    // Determine if we can use inline mode for ALL rows (based on longest URL)
+    const max_url_len = calcMaxUrlLen(sorted_prs);
+    const use_inline = urlFitsInline(terminal_width, fixed_columns, max_url_len) != null;
+
+    // Calculate title width - consistent for all rows
+    const title_width = if (use_inline)
+        urlFitsInline(terminal_width, fixed_columns, max_url_len).?
+    else if (terminal_width > fixed_columns)
+        terminal_width - fixed_columns
+    else
+        MIN_TITLE_WIDTH;
 
     // Print header with dynamic identifier column width
     try writer.writeAll("ORG/REPO#NUM");
@@ -210,9 +270,9 @@ pub fn formatMineOutput(
     }
     try writer.print("\n", .{});
 
-    // Print rows
+    // Print rows - all use the same format (inline or two-line)
     for (sorted_prs) |pr| {
-        try formatMineRow(writer, pr, current_time, title_width, identifier_width);
+        try formatMineRow(writer, pr, current_time, title_width, identifier_width, use_inline);
     }
 }
 
@@ -236,11 +296,21 @@ pub fn formatTeamOutput(
     // Calculate identifier width dynamically based on content
     const identifier_width = calcMaxIdentifierWidth(sorted_prs);
 
-    // Calculate title width
     const terminal_width = getTerminalWidth();
-    // Fixed columns: AUTHOR(8) + AGE(5) + 👤(3) + LAST(5) + spaces(10) = 31, plus dynamic identifier
-    const fixed_width: usize = 31 + identifier_width;
-    const title_width = if (terminal_width > fixed_width) terminal_width - fixed_width else 20;
+    // Fixed columns for team view: AUTHOR(8) + 2 + identifier_width + 2 + AGE(5) + 2 + 👤(3) + 2 + LAST(5) + 2 = identifier_width + 31
+    const fixed_columns = identifier_width + 31;
+
+    // Determine if we can use inline mode for ALL rows (based on longest URL)
+    const max_url_len = calcMaxUrlLen(sorted_prs);
+    const use_inline = urlFitsInline(terminal_width, fixed_columns, max_url_len) != null;
+
+    // Calculate title width - consistent for all rows
+    const title_width = if (use_inline)
+        urlFitsInline(terminal_width, fixed_columns, max_url_len).?
+    else if (terminal_width > fixed_columns)
+        terminal_width - fixed_columns
+    else
+        MIN_TITLE_WIDTH;
 
     // Print header with dynamic identifier column width
     try writer.writeAll("AUTHOR    ORG/REPO#NUM");
@@ -263,9 +333,9 @@ pub fn formatTeamOutput(
     }
     try writer.print("\n", .{});
 
-    // Print rows
+    // Print rows - all use the same format (inline or two-line)
     for (sorted_prs) |pr| {
-        try formatTeamRow(writer, pr, current_time, title_width, identifier_width);
+        try formatTeamRow(writer, pr, current_time, title_width, identifier_width, use_inline);
     }
 }
 
@@ -730,4 +800,231 @@ test "formatJsonOutput - empty list" {
 
     // Should output empty array
     try std.testing.expectEqualStrings("[]\n", buffer.items);
+}
+
+// Tests for inline URL functionality
+
+test "urlFitsInline - returns title width when URL fits" {
+    // terminal=150, fixed=35, url=45 → available = 150-35-45-2 = 68 >= 20
+    const result = urlFitsInline(150, 35, 45);
+    try std.testing.expectEqual(@as(?usize, 68), result);
+}
+
+test "urlFitsInline - returns null when URL doesn't fit" {
+    // terminal=80, fixed=35, url=45 → available = 80-35-45-2 = -2 < 20
+    const result = urlFitsInline(80, 35, 45);
+    try std.testing.expectEqual(@as(?usize, null), result);
+}
+
+test "urlFitsInline - returns exactly 20 at threshold boundary" {
+    // Need: terminal - fixed - url - 2 = 20
+    // terminal=100, fixed=30, url=48 → available = 100-30-48-2 = 20
+    const result = urlFitsInline(100, 30, 48);
+    try std.testing.expectEqual(@as(?usize, 20), result);
+}
+
+test "urlFitsInline - returns null at one below threshold" {
+    // terminal=100, fixed=30, url=49 → available = 100-30-49-2 = 19 < 20
+    const result = urlFitsInline(100, 30, 49);
+    try std.testing.expectEqual(@as(?usize, null), result);
+}
+
+test "formatMineRow - inline URL display" {
+    var buffer: std.ArrayListUnmanaged(u8) = .empty;
+    defer buffer.deinit(std.testing.allocator);
+
+    const pr = PullRequest{
+        .org = "k8s",
+        .repo = "kube",
+        .number = 1234,
+        .title = "Fix node scheduling bug",
+        .url = "https://github.com/k8s/kube/pull/1234",
+        .author = "alice",
+        .created_at = 100,
+        .last_comment_at = 900,
+        .unique_commenters = 4,
+    };
+
+    try formatMineRow(buffer.writer(std.testing.allocator), pr, 1000, 30, 15, true);
+
+    // URL should be on the same line (inline), not on a separate line
+    // Check there's only one newline (single line output)
+    var newline_count: usize = 0;
+    for (buffer.items) |c| {
+        if (c == '\n') newline_count += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 1), newline_count);
+
+    // URL should appear after the LAST column with 2-space separator
+    try std.testing.expect(std.mem.indexOf(u8, buffer.items, "  https://github.com/k8s/kube/pull/1234") != null);
+}
+
+test "formatMineRow - two-line URL display" {
+    var buffer: std.ArrayListUnmanaged(u8) = .empty;
+    defer buffer.deinit(std.testing.allocator);
+
+    const pr = PullRequest{
+        .org = "k8s",
+        .repo = "kube",
+        .number = 1234,
+        .title = "Fix node scheduling bug",
+        .url = "https://github.com/k8s/kube/pull/1234",
+        .author = "alice",
+        .created_at = 100,
+        .last_comment_at = 900,
+        .unique_commenters = 4,
+    };
+
+    try formatMineRow(buffer.writer(std.testing.allocator), pr, 1000, 30, 15, false);
+
+    // URL should be on a separate line with 4-space indent
+    // Check there are two newlines (two line output)
+    var newline_count: usize = 0;
+    for (buffer.items) |c| {
+        if (c == '\n') newline_count += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 2), newline_count);
+
+    // URL should appear with 4-space indent
+    try std.testing.expect(std.mem.indexOf(u8, buffer.items, "    https://github.com/k8s/kube/pull/1234") != null);
+}
+
+test "formatTeamRow - inline URL display" {
+    var buffer: std.ArrayListUnmanaged(u8) = .empty;
+    defer buffer.deinit(std.testing.allocator);
+
+    const pr = PullRequest{
+        .org = "k8s",
+        .repo = "kube",
+        .number = 1234,
+        .title = "Fix node scheduling bug",
+        .url = "https://github.com/k8s/kube/pull/1234",
+        .author = "alice",
+        .created_at = 100,
+        .last_comment_at = 900,
+        .unique_commenters = 4,
+    };
+
+    try formatTeamRow(buffer.writer(std.testing.allocator), pr, 1000, 30, 15, true);
+
+    // URL should be on the same line (inline)
+    var newline_count: usize = 0;
+    for (buffer.items) |c| {
+        if (c == '\n') newline_count += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 1), newline_count);
+
+    // URL should appear after the LAST column with 2-space separator
+    try std.testing.expect(std.mem.indexOf(u8, buffer.items, "  https://github.com/k8s/kube/pull/1234") != null);
+}
+
+test "formatTeamRow - two-line URL display" {
+    var buffer: std.ArrayListUnmanaged(u8) = .empty;
+    defer buffer.deinit(std.testing.allocator);
+
+    const pr = PullRequest{
+        .org = "k8s",
+        .repo = "kube",
+        .number = 1234,
+        .title = "Fix node scheduling bug",
+        .url = "https://github.com/k8s/kube/pull/1234",
+        .author = "alice",
+        .created_at = 100,
+        .last_comment_at = 900,
+        .unique_commenters = 4,
+    };
+
+    try formatTeamRow(buffer.writer(std.testing.allocator), pr, 1000, 30, 15, false);
+
+    // URL should be on a separate line
+    var newline_count: usize = 0;
+    for (buffer.items) |c| {
+        if (c == '\n') newline_count += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 2), newline_count);
+
+    // URL should appear with 4-space indent
+    try std.testing.expect(std.mem.indexOf(u8, buffer.items, "    https://github.com/k8s/kube/pull/1234") != null);
+}
+
+test "urlFitsInline - very long URL forces two-line format" {
+    // Very long URL (>100 chars) should not fit inline in typical terminal
+    // terminal=120, fixed=40, url=110 → available = 120-40-110-2 = -32 < 20
+    const result = urlFitsInline(120, 40, 110);
+    try std.testing.expectEqual(@as(?usize, null), result);
+}
+
+test "urlFitsInline - very long identifier reduces inline eligibility" {
+    // Long identifier increases fixed_columns, reducing space for title
+    // terminal=100, fixed=60 (long identifier), url=30 → available = 100-60-30-2 = 8 < 20
+    const result = urlFitsInline(100, 60, 30);
+    try std.testing.expectEqual(@as(?usize, null), result);
+}
+
+test "urlFitsInline - minimum title width preserved" {
+    // Even with plenty of terminal width, we should get at least MIN_TITLE_WIDTH (20)
+    // terminal=200, fixed=30, url=40 → available = 200-30-40-2 = 128 >= 20
+    const result = urlFitsInline(200, 30, 40);
+    try std.testing.expect(result != null);
+    try std.testing.expect(result.? >= MIN_TITLE_WIDTH);
+}
+
+test "urlFitsInline - terminal width equals total needed returns null" {
+    // Edge case: terminal exactly equals fixed + url + 2 (no room for title)
+    // terminal=77, fixed=35, url=40 → available = 77-35-40-2 = 0 < 20
+    const result = urlFitsInline(77, 35, 40);
+    try std.testing.expectEqual(@as(?usize, null), result);
+}
+
+test "urlFitsInline - terminal width less than fixed columns returns null" {
+    // Edge case: terminal smaller than fixed columns alone
+    // terminal=30, fixed=35, url=40 → overflow
+    const result = urlFitsInline(30, 35, 40);
+    try std.testing.expectEqual(@as(?usize, null), result);
+}
+
+test "formatMineRow - URL never truncated in inline mode" {
+    var buffer: std.ArrayListUnmanaged(u8) = .empty;
+    defer buffer.deinit(std.testing.allocator);
+
+    const long_url = "https://github.com/very-long-organization-name/very-long-repository-name/pull/12345";
+    const pr = PullRequest{
+        .org = "org",
+        .repo = "repo",
+        .number = 1,
+        .title = "Test",
+        .url = long_url,
+        .author = "alice",
+        .created_at = 100,
+        .last_comment_at = null,
+        .unique_commenters = 0,
+    };
+
+    try formatMineRow(buffer.writer(std.testing.allocator), pr, 1000, 20, 12, true);
+
+    // Full URL should appear without truncation
+    try std.testing.expect(std.mem.indexOf(u8, buffer.items, long_url) != null);
+}
+
+test "formatMineRow - URL never truncated in two-line mode" {
+    var buffer: std.ArrayListUnmanaged(u8) = .empty;
+    defer buffer.deinit(std.testing.allocator);
+
+    const long_url = "https://github.com/very-long-organization-name/very-long-repository-name/pull/12345";
+    const pr = PullRequest{
+        .org = "org",
+        .repo = "repo",
+        .number = 1,
+        .title = "Test",
+        .url = long_url,
+        .author = "alice",
+        .created_at = 100,
+        .last_comment_at = null,
+        .unique_commenters = 0,
+    };
+
+    try formatMineRow(buffer.writer(std.testing.allocator), pr, 1000, 20, 12, false);
+
+    // Full URL should appear without truncation
+    try std.testing.expect(std.mem.indexOf(u8, buffer.items, long_url) != null);
 }
