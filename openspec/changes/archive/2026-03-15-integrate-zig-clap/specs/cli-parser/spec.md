@@ -1,4 +1,4 @@
-## ADDED Requirements
+## MODIFIED Requirements
 
 ### Requirement: Parse --json flag for mine command
 The CLI parser SHALL accept `--json` flag for the mine command using zig-clap parameter definition.
@@ -26,62 +26,7 @@ The CLI parser SHALL accept `--json` flag for the team command using zig-clap pa
 - **WHEN** user runs `git-prs team --org mycompany`
 - **THEN** parser returns TeamArgs with json=false (default)
 
-### Requirement: Parse subcommand help with context
-The CLI parser SHALL return a help command with context indicating which subcommand's help was requested.
-
-#### Scenario: Help for mine command
-- **WHEN** user runs `git-prs mine --help`
-- **THEN** parser returns Command.help with target=mine
-
-#### Scenario: Help for mine command with -h flag
-- **WHEN** user runs `git-prs mine -h`
-- **THEN** parser returns Command.help with target=mine
-
-#### Scenario: Help for team command
-- **WHEN** user runs `git-prs team --help`
-- **THEN** parser returns Command.help with target=team
-
-#### Scenario: Help for merged command
-- **WHEN** user runs `git-prs merged --help`
-- **THEN** parser returns Command.help with target=merged
-
-#### Scenario: Top-level help
-- **WHEN** user runs `git-prs --help`
-- **THEN** parser returns Command.help with target=main
-
-### Requirement: Display subcommand-specific help
-The CLI SHALL display help specific to the subcommand when help is requested for that subcommand.
-
-#### Scenario: Mine help displays mine-specific content
-- **WHEN** user runs `git-prs mine --help`
-- **THEN** output includes "git-prs mine" usage and mine-specific options (--org, --limit, --since, --until, --json)
-
-#### Scenario: Team help displays team-specific content
-- **WHEN** user runs `git-prs team --help`
-- **THEN** output includes "git-prs team" usage and team-specific options (--org, --member, --since, --until, --json)
-
-#### Scenario: Merged help displays merged-specific content
-- **WHEN** user runs `git-prs merged --help`
-- **THEN** output includes "git-prs merged" usage and merged-specific options (--days, --org, --since, --until, --json)
-
-### Requirement: Parse --version with --json flag
-The CLI parser SHALL scan all arguments for `--version` flag before subcommand parsing, and check for `--json` flag when `--version` is found.
-
-#### Scenario: Version flag alone
-- **WHEN** args contain `--version` without `--json`
-- **THEN** parser returns version command with json=false
-
-#### Scenario: Version flag with --json
-- **WHEN** args contain both `--version` and `--json` in any order
-- **THEN** parser returns version command with json=true
-
-#### Scenario: Version flag scanned before subcommand parsing
-- **WHEN** args are `mine --version`
-- **THEN** parser returns version command (not mine command)
-
-#### Scenario: Version flag with json in subcommand context
-- **WHEN** args are `team --json --version`
-- **THEN** parser returns version command with json=true
+## ADDED Requirements
 
 ### Requirement: Parse arguments using zig-clap
 The CLI parser SHALL use zig-clap library for all argument parsing instead of manual parsing functions.

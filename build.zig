@@ -23,6 +23,9 @@ pub fn build(b: *std.Build) void {
 
     // Read version and name from build.zig.zon
     const zon = @import("build.zig.zon");
+
+    // Add clap dependency
+    const clap = b.dependency("clap", .{});
     const name_str = @tagName(zon.name);
     // Convert underscores to hyphens for display name (git_prs -> git-prs)
     var display_name_buf: [64]u8 = undefined;
@@ -56,6 +59,9 @@ pub fn build(b: *std.Build) void {
         // Later on we'll use this module as the root module of a test executable
         // which requires us to specify a target.
         .target = target,
+        .imports = &.{
+            .{ .name = "clap", .module = clap.module("clap") },
+        },
     });
 
     // Here we define an executable. An executable needs to have a root module
@@ -97,6 +103,7 @@ pub fn build(b: *std.Build) void {
                 // importing modules from different packages).
                 .{ .name = "git_prs", .module = mod },
                 .{ .name = "build_options", .module = options.createModule() },
+                .{ .name = "clap", .module = clap.module("clap") },
             },
         }),
     });
@@ -146,6 +153,8 @@ pub fn build(b: *std.Build) void {
     // Creates an executable that will run `test` blocks from the executable's
     // root module. Note that test executables only test one module at a time,
     // hence why we have to create two separate ones.
+    // We need to manually add clap module for tests since exe.root_module doesn't
+    // automatically include it in the test context
     const exe_tests = b.addTest(.{
         .root_module = exe.root_module,
     });
@@ -199,6 +208,7 @@ pub fn build(b: *std.Build) void {
                 .imports = &.{
                     .{ .name = "git_prs", .module = mod },
                     .{ .name = "build_options", .module = options.createModule() },
+                    .{ .name = "clap", .module = clap.module("clap") },
                 },
             }),
         });
@@ -285,6 +295,7 @@ pub fn build(b: *std.Build) void {
                 .imports = &.{
                     .{ .name = "git_prs", .module = mod },
                     .{ .name = "build_options", .module = options.createModule() },
+                    .{ .name = "clap", .module = clap.module("clap") },
                 },
             }),
         });

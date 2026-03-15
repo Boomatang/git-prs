@@ -1,4 +1,5 @@
 const std = @import("std");
+const clap = @import("clap");
 
 pub const MineArgs = struct {
     org_filter: ?[]const u8 = null, // --org value or null
@@ -29,11 +30,18 @@ pub const VersionArgs = struct {
     json: bool = false,
 };
 
+pub const HelpTarget = enum {
+    main,
+    mine,
+    team,
+    merged,
+};
+
 pub const Command = union(enum) {
     mine: MineArgs,
     team: TeamArgs,
     merged: MergedArgs,
-    help: void,
+    help: HelpTarget,
     version: VersionArgs,
 };
 
@@ -47,49 +55,6 @@ pub const ParseError = error{
     InvalidDaysValue,
 };
 
-/// Check if a flag exists anywhere in the argument list
-fn hasFlag(args: []const []const u8, flag: []const u8) bool {
-    for (args) |arg| {
-        if (std.mem.eql(u8, arg, flag)) {
-            return true;
-        }
-    }
-    return false;
-}
-
-/// Parse command line arguments.
-/// Returns the parsed command or shows help message and returns .help
-pub fn parseArgs(allocator: std.mem.Allocator, args: []const []const u8) ParseError!Command {
-    _ = allocator;
-
-    // No arguments or --help flag
-    if (args.len == 0) {
-        return .help;
-    }
-
-    // Check for --help flag
-    if (std.mem.eql(u8, args[0], "--help") or std.mem.eql(u8, args[0], "-h")) {
-        return .help;
-    }
-
-    // Check for --version flag anywhere in args (before subcommand parsing)
-    if (hasFlag(args, "--version")) {
-        return .{ .version = .{ .json = hasFlag(args, "--json") } };
-    }
-
-    const command_name = args[0];
-
-    if (std.mem.eql(u8, command_name, "mine")) {
-        return .{ .mine = try parseMineArgs(args[1..]) };
-    } else if (std.mem.eql(u8, command_name, "team")) {
-        return .{ .team = try parseTeamArgs(args[1..]) };
-    } else if (std.mem.eql(u8, command_name, "merged")) {
-        return .{ .merged = try parseMergedArgs(args[1..]) };
-    } else {
-        return error.UnknownCommand;
-    }
-}
-
 /// Validate date format is YYYY-MM-DD
 fn isValidDateFormat(date_str: []const u8) bool {
     if (date_str.len != 10) return false;
@@ -102,223 +67,306 @@ fn isValidDateFormat(date_str: []const u8) bool {
     return true;
 }
 
-fn parseMineArgs(args: []const []const u8) ParseError!MineArgs {
-    var result = MineArgs{};
-    var i: usize = 0;
+// Parameter definitions for each command using clap.parseParamsComptime
+const mine_params = clap.parseParamsComptime(
+    \\-h, --help             Show help for mine command
+    \\    --org <str>        Filter to specific org
+    \\-l, --limit <u32>      Max PRs to show (default: 50)
+    \\    --since <str>      Only PRs created on or after this date (YYYY-MM-DD)
+    \\    --until <str>      Only PRs created on or before this date (YYYY-MM-DD)
+    \\    --json             Output as JSON array
+    \\    --version          Show version information
+    \\
+);
 
-    while (i < args.len) {
-        const arg = args[i];
+const team_params = clap.parseParamsComptime(
+    \\-h, --help             Show help for team command
+    \\    --org <str>        Filter to specific org
+    \\    --member <str>     Filter to specific team member
+    \\    --since <str>      Only PRs created on or after this date (YYYY-MM-DD)
+    \\    --until <str>      Only PRs created on or before this date (YYYY-MM-DD)
+    \\    --json             Output as JSON array
+    \\    --version          Show version information
+    \\<str>...
+    \\
+);
 
-        if (std.mem.eql(u8, arg, "--org")) {
-            i += 1;
-            if (i >= args.len) {
-                return error.MissingFlagValue;
-            }
-            result.org_filter = args[i];
-        } else if (std.mem.eql(u8, arg, "--limit")) {
-            i += 1;
-            if (i >= args.len) {
-                return error.MissingFlagValue;
-            }
-            result.limit = std.fmt.parseInt(u32, args[i], 10) catch {
-                return error.InvalidLimitValue;
-            };
-        } else if (std.mem.eql(u8, arg, "--json")) {
-            result.json = true;
-        } else if (std.mem.eql(u8, arg, "--since")) {
-            i += 1;
-            if (i >= args.len) {
-                return error.MissingFlagValue;
-            }
-            const date = args[i];
-            if (!isValidDateFormat(date)) {
-                return error.InvalidDateValue;
-            }
-            result.since = date;
-        } else if (std.mem.eql(u8, arg, "--until")) {
-            i += 1;
-            if (i >= args.len) {
-                return error.MissingFlagValue;
-            }
-            const date = args[i];
-            if (!isValidDateFormat(date)) {
-                return error.InvalidDateValue;
-            }
-            result.until = date;
-        } else {
-            return error.InvalidFlag;
-        }
+const merged_params = clap.parseParamsComptime(
+    \\-h, --help             Show help for merged command
+    \\    --days <u32>       Show PRs merged in last N days
+    \\    --org <str>        Filter to specific org
+    \\    --since <str>      Only PRs merged on or after this date (YYYY-MM-DD)
+    \\    --until <str>      Only PRs merged on or before this date (YYYY-MM-DD)
+    \\    --json             Output as JSON array
+    \\    --version          Show version information
+    \\
+);
 
-        i += 1;
+/// Parse command line arguments using clap.
+/// Returns the parsed command or shows help message and returns .help
+pub fn parseArgs(allocator: std.mem.Allocator, args: []const []const u8) ParseError!Command {
+    // No arguments - show help
+    if (args.len == 0) {
+        return .{ .help = .main };
     }
 
-    return result;
+    // Check for --version flag anywhere in args (before subcommand parsing)
+    for (args) |arg| {
+        if (std.mem.eql(u8, arg, "--version")) {
+            // Check for --json flag
+            for (args) |a| {
+                if (std.mem.eql(u8, a, "--json")) {
+                    return .{ .version = .{ .json = true } };
+                }
+            }
+            return .{ .version = .{ .json = false } };
+        }
+    }
+
+    // Check for --help or -h flag at first position
+    if (std.mem.eql(u8, args[0], "--help") or std.mem.eql(u8, args[0], "-h")) {
+        return .{ .help = .main };
+    }
+
+    const command_name = args[0];
+    const sub_args = args[1..];
+
+    if (std.mem.eql(u8, command_name, "mine")) {
+        return parseMineCommand(allocator, sub_args);
+    } else if (std.mem.eql(u8, command_name, "team")) {
+        return parseTeamCommand(allocator, sub_args);
+    } else if (std.mem.eql(u8, command_name, "merged")) {
+        return parseMergedCommand(allocator, sub_args);
+    } else {
+        return error.UnknownCommand;
+    }
 }
 
-fn parseTeamArgs(args: []const []const u8) ParseError!TeamArgs {
-    var result = TeamArgs{};
-    var i: usize = 0;
+fn parseMineCommand(allocator: std.mem.Allocator, args: []const []const u8) ParseError!Command {
+    var iter = clap.args.SliceIterator{ .args = args };
+    var res = clap.parseEx(clap.Help, &mine_params, clap.parsers.default, &iter, .{
+        .allocator = allocator,
+    }) catch {
+        return error.InvalidFlag;
+    };
+    defer res.deinit();
 
-    // Parse optional positional team name (first arg if it doesn't start with --)
-    if (args.len > 0 and !std.mem.startsWith(u8, args[0], "--")) {
-        result.team_name = args[0];
-        i = 1;
+    // Check for help flag
+    if (res.args.help != 0) {
+        return .{ .help = .mine };
     }
 
-    while (i < args.len) {
-        const arg = args[i];
+    // Check for version flag
+    if (res.args.version != 0) {
+        return .{ .version = .{ .json = res.args.json != 0 } };
+    }
 
-        if (std.mem.eql(u8, arg, "--org")) {
-            i += 1;
-            if (i >= args.len) {
-                return error.MissingFlagValue;
-            }
-            result.org = args[i];
-        } else if (std.mem.eql(u8, arg, "--member")) {
-            i += 1;
-            if (i >= args.len) {
-                return error.MissingFlagValue;
-            }
-            result.member_filter = args[i];
-        } else if (std.mem.eql(u8, arg, "--json")) {
-            result.json = true;
-        } else if (std.mem.eql(u8, arg, "--since")) {
-            i += 1;
-            if (i >= args.len) {
-                return error.MissingFlagValue;
-            }
-            const date = args[i];
-            if (!isValidDateFormat(date)) {
-                return error.InvalidDateValue;
-            }
-            result.since = date;
-        } else if (std.mem.eql(u8, arg, "--until")) {
-            i += 1;
-            if (i >= args.len) {
-                return error.MissingFlagValue;
-            }
-            const date = args[i];
-            if (!isValidDateFormat(date)) {
-                return error.InvalidDateValue;
-            }
-            result.until = date;
-        } else {
-            return error.InvalidFlag;
+    // Validate dates
+    if (res.args.since) |since| {
+        if (!isValidDateFormat(since)) {
+            return error.InvalidDateValue;
         }
-
-        i += 1;
+    }
+    if (res.args.until) |until| {
+        if (!isValidDateFormat(until)) {
+            return error.InvalidDateValue;
+        }
     }
 
-    return result;
+    return .{ .mine = .{
+        .org_filter = res.args.org,
+        .limit = res.args.limit orelse 50,
+        .json = res.args.json != 0,
+        .since = res.args.since,
+        .until = res.args.until,
+    } };
 }
 
-fn parseMergedArgs(args: []const []const u8) ParseError!MergedArgs {
-    var result = MergedArgs{};
-    var i: usize = 0;
+fn parseTeamCommand(allocator: std.mem.Allocator, args: []const []const u8) ParseError!Command {
+    var iter = clap.args.SliceIterator{ .args = args };
+    var res = clap.parseEx(clap.Help, &team_params, clap.parsers.default, &iter, .{
+        .allocator = allocator,
+    }) catch {
+        return error.InvalidFlag;
+    };
+    defer res.deinit();
 
-    while (i < args.len) {
-        const arg = args[i];
+    // Check for help flag
+    if (res.args.help != 0) {
+        return .{ .help = .team };
+    }
 
-        if (std.mem.eql(u8, arg, "--org")) {
-            i += 1;
-            if (i >= args.len) {
-                return error.MissingFlagValue;
-            }
-            result.org_filter = args[i];
-        } else if (std.mem.eql(u8, arg, "--days")) {
-            i += 1;
-            if (i >= args.len) {
-                return error.MissingFlagValue;
-            }
-            result.days = std.fmt.parseInt(u32, args[i], 10) catch {
-                return error.InvalidDaysValue;
-            };
-        } else if (std.mem.eql(u8, arg, "--json")) {
-            result.json = true;
-        } else if (std.mem.eql(u8, arg, "--since")) {
-            i += 1;
-            if (i >= args.len) {
-                return error.MissingFlagValue;
-            }
-            const date = args[i];
-            if (!isValidDateFormat(date)) {
-                return error.InvalidDateValue;
-            }
-            result.since = date;
-        } else if (std.mem.eql(u8, arg, "--until")) {
-            i += 1;
-            if (i >= args.len) {
-                return error.MissingFlagValue;
-            }
-            const date = args[i];
-            if (!isValidDateFormat(date)) {
-                return error.InvalidDateValue;
-            }
-            result.until = date;
-        } else {
-            return error.InvalidFlag;
+    // Check for version flag
+    if (res.args.version != 0) {
+        return .{ .version = .{ .json = res.args.json != 0 } };
+    }
+
+    // Validate dates
+    if (res.args.since) |since| {
+        if (!isValidDateFormat(since)) {
+            return error.InvalidDateValue;
         }
+    }
+    if (res.args.until) |until| {
+        if (!isValidDateFormat(until)) {
+            return error.InvalidDateValue;
+        }
+    }
 
-        i += 1;
+    // Get team name from positional arguments (res.positionals[0] is []const []const u8)
+    const positional_args = res.positionals[0];
+    const team_name = if (positional_args.len > 0) positional_args[0] else null;
+
+    return .{ .team = .{
+        .team_name = team_name,
+        .org = res.args.org,
+        .member_filter = res.args.member,
+        .json = res.args.json != 0,
+        .since = res.args.since,
+        .until = res.args.until,
+    } };
+}
+
+fn parseMergedCommand(allocator: std.mem.Allocator, args: []const []const u8) ParseError!Command {
+    var iter = clap.args.SliceIterator{ .args = args };
+    var res = clap.parseEx(clap.Help, &merged_params, clap.parsers.default, &iter, .{
+        .allocator = allocator,
+    }) catch {
+        return error.InvalidFlag;
+    };
+    defer res.deinit();
+
+    // Check for help flag
+    if (res.args.help != 0) {
+        return .{ .help = .merged };
+    }
+
+    // Check for version flag
+    if (res.args.version != 0) {
+        return .{ .version = .{ .json = res.args.json != 0 } };
+    }
+
+    // Validate dates
+    if (res.args.since) |since| {
+        if (!isValidDateFormat(since)) {
+            return error.InvalidDateValue;
+        }
+    }
+    if (res.args.until) |until| {
+        if (!isValidDateFormat(until)) {
+            return error.InvalidDateValue;
+        }
     }
 
     // Validate: --days is mutually exclusive with --since or --until
-    if (result.days != null and (result.since != null or result.until != null)) {
+    if (res.args.days != null and (res.args.since != null or res.args.until != null)) {
         return error.DaysWithDateRange;
     }
 
-    return result;
+    return .{ .merged = .{
+        .days = res.args.days,
+        .org_filter = res.args.org,
+        .json = res.args.json != 0,
+        .since = res.args.since,
+        .until = res.args.until,
+    } };
 }
 
-/// Write usage information to the provided writer
+/// Write usage information to the provided writer (using clap's help generation)
 pub fn printUsage(writer: anytype) !void {
     try writer.writeAll(
         \\git-prs - Manage GitHub Pull Requests
         \\
-        \\USAGE:
-        \\    git-prs <COMMAND> [OPTIONS]
+        \\Usage: git-prs <command> [options]
         \\
-        \\COMMANDS:
-        \\    mine                   List PRs assigned to you
-        \\    team [name]            List PRs for your team
-        \\    merged                 List merged PRs by you
-        \\    --help, -h             Show this help message
+        \\Commands:
+        \\  mine      List PRs assigned to you
+        \\  team      List PRs for your team
+        \\  merged    List merged PRs by you
         \\
-        \\MINE OPTIONS:
-        \\    --org <name>           Filter to specific org (optional)
-        \\    --limit <n>            Max PRs to show (default: 50)
-        \\    --since <YYYY-MM-DD>   Only PRs created on or after this date
-        \\    --until <YYYY-MM-DD>   Only PRs created on or before this date
-        \\    --json                 Output as JSON array
+        \\General Options:
+        \\  -h, --help     Show this help message
+        \\      --version  Show version information
         \\
-        \\TEAM OPTIONS:
-        \\    [name]                 Team name (uses default or auto-selects if omitted)
-        \\    --org <name>           Filter to specific org (optional)
-        \\    --member <username>    Filter to specific team member (optional)
-        \\    --since <YYYY-MM-DD>   Only PRs created on or after this date (overrides config)
-        \\    --until <YYYY-MM-DD>   Only PRs created on or before this date (overrides config)
-        \\    --json                 Output as JSON array
+        \\Run 'git-prs <command> --help' for more information on a command.
         \\
-        \\MERGED OPTIONS:
-        \\    --days <n>             Show PRs merged in last N days (default: 7)
-        \\    --since <YYYY-MM-DD>   Only PRs merged on or after this date
-        \\    --until <YYYY-MM-DD>   Only PRs merged on or before this date
-        \\    --org <name>           Filter to specific org (optional)
-        \\    --json                 Output as JSON array
+    );
+}
+
+/// Print help for the mine command
+pub fn printMineHelp(writer: anytype) !void {
+    try writer.writeAll(
+        \\git-prs mine - List PRs assigned to you
         \\
-        \\    Note: --days is mutually exclusive with --since/--until
+        \\Usage: git-prs mine [options]
         \\
-        \\EXAMPLES:
-        \\    git-prs mine
-        \\    git-prs mine --org kubernetes --limit 10
-        \\    git-prs mine --since 2025-01-01
-        \\    git-prs team
-        \\    git-prs team release
-        \\    git-prs team release --member alice
-        \\    git-prs team traffic --since 2025-01-01 --until 2025-06-30
-        \\    git-prs merged
-        \\    git-prs merged --days 14
-        \\    git-prs merged --since 2025-01-01 --until 2025-06-30
+        \\Options:
+        \\  -h, --help         Show this help message
+        \\      --org <str>    Filter to specific org
+        \\  -l, --limit <u32>  Max PRs to show (default: 50)
+        \\      --since <str>  Only PRs created on or after this date (YYYY-MM-DD)
+        \\      --until <str>  Only PRs created on or before this date (YYYY-MM-DD)
+        \\      --json         Output as JSON array
+        \\      --version      Show version information
+        \\
+        \\Examples:
+        \\  git-prs mine
+        \\  git-prs mine --org kubernetes --limit 10
+        \\  git-prs mine --since 2025-01-01
+        \\
+    );
+}
+
+/// Print help for the team command
+pub fn printTeamHelp(writer: anytype) !void {
+    try writer.writeAll(
+        \\git-prs team - List PRs for your team
+        \\
+        \\Usage: git-prs team [name] [options]
+        \\
+        \\Arguments:
+        \\  [name]    Team name (uses default or auto-selects if omitted)
+        \\
+        \\Options:
+        \\  -h, --help           Show this help message
+        \\      --org <str>      Filter to specific org
+        \\      --member <str>   Filter to specific team member
+        \\      --since <str>    Only PRs created on or after this date (YYYY-MM-DD)
+        \\      --until <str>    Only PRs created on or before this date (YYYY-MM-DD)
+        \\      --json           Output as JSON array
+        \\      --version        Show version information
+        \\
+        \\Examples:
+        \\  git-prs team
+        \\  git-prs team release
+        \\  git-prs team release --member alice
+        \\  git-prs team traffic --since 2025-01-01 --until 2025-06-30
+        \\
+    );
+}
+
+/// Print help for the merged command
+pub fn printMergedHelp(writer: anytype) !void {
+    try writer.writeAll(
+        \\git-prs merged - List merged PRs by you
+        \\
+        \\Usage: git-prs merged [options]
+        \\
+        \\Options:
+        \\  -h, --help         Show this help message
+        \\      --days <u32>   Show PRs merged in last N days
+        \\      --org <str>    Filter to specific org
+        \\      --since <str>  Only PRs merged on or after this date (YYYY-MM-DD)
+        \\      --until <str>  Only PRs merged on or before this date (YYYY-MM-DD)
+        \\      --json         Output as JSON array
+        \\      --version      Show version information
+        \\
+        \\Note: --days is mutually exclusive with --since/--until
+        \\
+        \\Examples:
+        \\  git-prs merged
+        \\  git-prs merged --days 14
+        \\  git-prs merged --since 2025-01-01 --until 2025-06-30
         \\
     );
 }
@@ -389,7 +437,7 @@ test "--help returns help command" {
     const args = [_][]const u8{"--help"};
 
     const result = try parseArgs(allocator, &args);
-    try std.testing.expectEqual(Command.help, std.meta.activeTag(result));
+    try std.testing.expectEqual(Command{ .help = .main }, result);
 }
 
 test "no arguments returns help command" {
@@ -397,7 +445,7 @@ test "no arguments returns help command" {
     const args = [_][]const u8{};
 
     const result = try parseArgs(allocator, &args);
-    try std.testing.expectEqual(Command.help, std.meta.activeTag(result));
+    try std.testing.expectEqual(Command{ .help = .main }, result);
 }
 
 test "unknown command returns error" {
@@ -421,7 +469,7 @@ test "missing --org value returns error" {
     const args = [_][]const u8{ "mine", "--org" };
 
     const result = parseArgs(allocator, &args);
-    try std.testing.expectError(error.MissingFlagValue, result);
+    try std.testing.expectError(error.InvalidFlag, result);
 }
 
 test "missing --limit value returns error" {
@@ -429,7 +477,7 @@ test "missing --limit value returns error" {
     const args = [_][]const u8{ "mine", "--limit" };
 
     const result = parseArgs(allocator, &args);
-    try std.testing.expectError(error.MissingFlagValue, result);
+    try std.testing.expectError(error.InvalidFlag, result);
 }
 
 test "invalid limit value returns error" {
@@ -437,7 +485,7 @@ test "invalid limit value returns error" {
     const args = [_][]const u8{ "mine", "--limit", "not-a-number" };
 
     const result = parseArgs(allocator, &args);
-    try std.testing.expectError(error.InvalidLimitValue, result);
+    try std.testing.expectError(error.InvalidFlag, result);
 }
 
 test "printUsage writes help text" {
@@ -450,9 +498,6 @@ test "printUsage writes help text" {
     try std.testing.expect(std.mem.indexOf(u8, output, "git-prs") != null);
     try std.testing.expect(std.mem.indexOf(u8, output, "mine") != null);
     try std.testing.expect(std.mem.indexOf(u8, output, "team") != null);
-    try std.testing.expect(std.mem.indexOf(u8, output, "--org") != null);
-    try std.testing.expect(std.mem.indexOf(u8, output, "--limit") != null);
-    try std.testing.expect(std.mem.indexOf(u8, output, "--member") != null);
 }
 
 test "-h flag returns help command" {
@@ -460,7 +505,7 @@ test "-h flag returns help command" {
     const args = [_][]const u8{"-h"};
 
     const result = try parseArgs(allocator, &args);
-    try std.testing.expectEqual(Command.help, std.meta.activeTag(result));
+    try std.testing.expectEqual(Command{ .help = .main }, result);
 }
 
 test "--version flag returns version command" {
@@ -495,7 +540,7 @@ test "missing --member value returns error" {
     const args = [_][]const u8{ "team", "--member" };
 
     const result = parseArgs(allocator, &args);
-    try std.testing.expectError(error.MissingFlagValue, result);
+    try std.testing.expectError(error.InvalidFlag, result);
 }
 
 test "mine with --json flag" {
@@ -599,7 +644,7 @@ test "missing date value returns error" {
     const args = [_][]const u8{ "mine", "--since" };
 
     const result = parseArgs(allocator, &args);
-    try std.testing.expectError(error.MissingFlagValue, result);
+    try std.testing.expectError(error.InvalidFlag, result);
 }
 
 test "merged with no flags" {
@@ -671,7 +716,7 @@ test "merged with invalid --days value" {
     const args = [_][]const u8{ "merged", "--days", "not-a-number" };
 
     const result = parseArgs(allocator, &args);
-    try std.testing.expectError(error.InvalidDaysValue, result);
+    try std.testing.expectError(error.InvalidFlag, result);
 }
 
 test "merged with all flags" {
@@ -719,4 +764,28 @@ test "mine --json --version returns version with json=true" {
     const result = try parseArgs(allocator, &args);
     try std.testing.expectEqual(Command.version, std.meta.activeTag(result));
     try std.testing.expect(result.version.json);
+}
+
+test "mine --help returns mine help" {
+    const allocator = std.testing.allocator;
+    const args = [_][]const u8{ "mine", "--help" };
+
+    const result = try parseArgs(allocator, &args);
+    try std.testing.expectEqual(Command{ .help = .mine }, result);
+}
+
+test "team --help returns team help" {
+    const allocator = std.testing.allocator;
+    const args = [_][]const u8{ "team", "--help" };
+
+    const result = try parseArgs(allocator, &args);
+    try std.testing.expectEqual(Command{ .help = .team }, result);
+}
+
+test "merged --help returns merged help" {
+    const allocator = std.testing.allocator;
+    const args = [_][]const u8{ "merged", "--help" };
+
+    const result = try parseArgs(allocator, &args);
+    try std.testing.expectEqual(Command{ .help = .merged }, result);
 }

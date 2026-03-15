@@ -55,10 +55,15 @@ pub fn main() !void {
     };
 
     switch (command) {
-        .help => {
+        .help => |help_target| {
             var buf: [4096]u8 = undefined;
             var fbs = std.io.fixedBufferStream(&buf);
-            cli.printUsage(fbs.writer()) catch {};
+            switch (help_target) {
+                .main => cli.printUsage(fbs.writer()) catch {},
+                .mine => cli.printMineHelp(fbs.writer()) catch {},
+                .team => cli.printTeamHelp(fbs.writer()) catch {},
+                .merged => cli.printMergedHelp(fbs.writer()) catch {},
+            }
             _ = stdout.write(fbs.getWritten()) catch {};
             return;
         },
