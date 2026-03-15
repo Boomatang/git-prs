@@ -25,12 +25,16 @@ pub const MergedArgs = struct {
     until: ?[]const u8 = null, // --until YYYY-MM-DD (used with --since)
 };
 
+pub const VersionArgs = struct {
+    json: bool = false,
+};
+
 pub const Command = union(enum) {
     mine: MineArgs,
     team: TeamArgs,
     merged: MergedArgs,
     help: void,
-    version: void,
+    version: VersionArgs,
 };
 
 pub const ParseError = error{
@@ -42,6 +46,16 @@ pub const ParseError = error{
     DaysWithDateRange,
     InvalidDaysValue,
 };
+
+/// Check if a flag exists anywhere in the argument list
+fn hasFlag(args: []const []const u8, flag: []const u8) bool {
+    for (args) |arg| {
+        if (std.mem.eql(u8, arg, flag)) {
+            return true;
+        }
+    }
+    return false;
+}
 
 /// Parse command line arguments.
 /// Returns the parsed command or shows help message and returns .help
@@ -58,9 +72,9 @@ pub fn parseArgs(allocator: std.mem.Allocator, args: []const []const u8) ParseEr
         return .help;
     }
 
-    // Check for --version flag
-    if (std.mem.eql(u8, args[0], "--version")) {
-        return .version;
+    // Check for --version flag anywhere in args (before subcommand parsing)
+    if (hasFlag(args, "--version")) {
+        return .{ .version = .{ .json = hasFlag(args, "--json") } };
     }
 
     const command_name = args[0];
@@ -455,6 +469,7 @@ test "--version flag returns version command" {
 
     const result = try parseArgs(allocator, &args);
     try std.testing.expectEqual(Command.version, std.meta.activeTag(result));
+    try std.testing.expect(!result.version.json);
 }
 
 test "team with no flags" {
@@ -668,4 +683,40 @@ test "merged with all flags" {
     try std.testing.expectEqual(@as(?u32, 30), result.merged.days);
     try std.testing.expectEqualStrings("kubernetes", result.merged.org_filter.?);
     try std.testing.expect(result.merged.json);
+}
+
+test "--version --json returns version with json=true" {
+    const allocator = std.testing.allocator;
+    const args = [_][]const u8{ "--version", "--json" };
+
+    const result = try parseArgs(allocator, &args);
+    try std.testing.expectEqual(Command.version, std.meta.activeTag(result));
+    try std.testing.expect(result.version.json);
+}
+
+test "--json --version returns version with json=true" {
+    const allocator = std.testing.allocator;
+    const args = [_][]const u8{ "--json", "--version" };
+
+    const result = try parseArgs(allocator, &args);
+    try std.testing.expectEqual(Command.version, std.meta.activeTag(result));
+    try std.testing.expect(result.version.json);
+}
+
+test "mine --version returns version command (not mine)" {
+    const allocator = std.testing.allocator;
+    const args = [_][]const u8{ "mine", "--version" };
+
+    const result = try parseArgs(allocator, &args);
+    try std.testing.expectEqual(Command.version, std.meta.activeTag(result));
+    try std.testing.expect(!result.version.json);
+}
+
+test "mine --json --version returns version with json=true" {
+    const allocator = std.testing.allocator;
+    const args = [_][]const u8{ "mine", "--json", "--version" };
+
+    const result = try parseArgs(allocator, &args);
+    try std.testing.expectEqual(Command.version, std.meta.activeTag(result));
+    try std.testing.expect(result.version.json);
 }

@@ -62,8 +62,12 @@ pub fn main() !void {
             _ = stdout.write(fbs.getWritten()) catch {};
             return;
         },
-        .version => {
-            _ = try stdout.write(build_options.name ++ " " ++ build_options.version ++ "\n");
+        .version => |version_args| {
+            if (version_args.json) {
+                _ = try stdout.write("{\"name\":\"" ++ build_options.name ++ "\",\"version\":\"" ++ build_options.version ++ "\"}\n");
+            } else {
+                _ = try stdout.write(build_options.name ++ " " ++ build_options.version ++ "\n");
+            }
             return;
         },
         .mine => |mine_args| {
