@@ -30,11 +30,18 @@ pub const VersionArgs = struct {
     json: bool = false,
 };
 
+pub const HelpTarget = enum {
+    main,
+    mine,
+    team,
+    merged,
+};
+
 pub const Command = union(enum) {
     mine: MineArgs,
     team: TeamArgs,
     merged: MergedArgs,
-    help: void,
+    help: HelpTarget,
     version: VersionArgs,
 };
 
@@ -100,7 +107,7 @@ const merged_params = clap.parseParamsComptime(
 pub fn parseArgs(allocator: std.mem.Allocator, args: []const []const u8) ParseError!Command {
     // No arguments - show help
     if (args.len == 0) {
-        return .help;
+        return .{ .help = .main };
     }
 
     // Check for --version flag anywhere in args (before subcommand parsing)
@@ -118,7 +125,7 @@ pub fn parseArgs(allocator: std.mem.Allocator, args: []const []const u8) ParseEr
 
     // Check for --help or -h flag at first position
     if (std.mem.eql(u8, args[0], "--help") or std.mem.eql(u8, args[0], "-h")) {
-        return .help;
+        return .{ .help = .main };
     }
 
     const command_name = args[0];
@@ -146,7 +153,7 @@ fn parseMineCommand(allocator: std.mem.Allocator, args: []const []const u8) Pars
 
     // Check for help flag
     if (res.args.help != 0) {
-        return .help;
+        return .{ .help = .mine };
     }
 
     // Check for version flag
@@ -186,7 +193,7 @@ fn parseTeamCommand(allocator: std.mem.Allocator, args: []const []const u8) Pars
 
     // Check for help flag
     if (res.args.help != 0) {
-        return .help;
+        return .{ .help = .team };
     }
 
     // Check for version flag
@@ -231,7 +238,7 @@ fn parseMergedCommand(allocator: std.mem.Allocator, args: []const []const u8) Pa
 
     // Check for help flag
     if (res.args.help != 0) {
-        return .help;
+        return .{ .help = .merged };
     }
 
     // Check for version flag
@@ -294,10 +301,13 @@ pub fn printMineHelp(writer: anytype) !void {
         \\Usage: git-prs mine [options]
         \\
         \\Options:
-        \\
-    );
-    clap.help(writer, clap.Help, &mine_params, .{}) catch {};
-    try writer.writeAll(
+        \\  -h, --help         Show this help message
+        \\      --org <str>    Filter to specific org
+        \\  -l, --limit <u32>  Max PRs to show (default: 50)
+        \\      --since <str>  Only PRs created on or after this date (YYYY-MM-DD)
+        \\      --until <str>  Only PRs created on or before this date (YYYY-MM-DD)
+        \\      --json         Output as JSON array
+        \\      --version      Show version information
         \\
         \\Examples:
         \\  git-prs mine
@@ -318,10 +328,13 @@ pub fn printTeamHelp(writer: anytype) !void {
         \\  [name]    Team name (uses default or auto-selects if omitted)
         \\
         \\Options:
-        \\
-    );
-    clap.help(writer, clap.Help, &team_params, .{}) catch {};
-    try writer.writeAll(
+        \\  -h, --help           Show this help message
+        \\      --org <str>      Filter to specific org
+        \\      --member <str>   Filter to specific team member
+        \\      --since <str>    Only PRs created on or after this date (YYYY-MM-DD)
+        \\      --until <str>    Only PRs created on or before this date (YYYY-MM-DD)
+        \\      --json           Output as JSON array
+        \\      --version        Show version information
         \\
         \\Examples:
         \\  git-prs team
@@ -340,10 +353,13 @@ pub fn printMergedHelp(writer: anytype) !void {
         \\Usage: git-prs merged [options]
         \\
         \\Options:
-        \\
-    );
-    clap.help(writer, clap.Help, &merged_params, .{}) catch {};
-    try writer.writeAll(
+        \\  -h, --help         Show this help message
+        \\      --days <u32>   Show PRs merged in last N days
+        \\      --org <str>    Filter to specific org
+        \\      --since <str>  Only PRs merged on or after this date (YYYY-MM-DD)
+        \\      --until <str>  Only PRs merged on or before this date (YYYY-MM-DD)
+        \\      --json         Output as JSON array
+        \\      --version      Show version information
         \\
         \\Note: --days is mutually exclusive with --since/--until
         \\
@@ -421,7 +437,7 @@ test "--help returns help command" {
     const args = [_][]const u8{"--help"};
 
     const result = try parseArgs(allocator, &args);
-    try std.testing.expectEqual(Command.help, std.meta.activeTag(result));
+    try std.testing.expectEqual(Command{ .help = .main }, result);
 }
 
 test "no arguments returns help command" {
@@ -429,7 +445,7 @@ test "no arguments returns help command" {
     const args = [_][]const u8{};
 
     const result = try parseArgs(allocator, &args);
-    try std.testing.expectEqual(Command.help, std.meta.activeTag(result));
+    try std.testing.expectEqual(Command{ .help = .main }, result);
 }
 
 test "unknown command returns error" {
@@ -489,7 +505,7 @@ test "-h flag returns help command" {
     const args = [_][]const u8{"-h"};
 
     const result = try parseArgs(allocator, &args);
-    try std.testing.expectEqual(Command.help, std.meta.activeTag(result));
+    try std.testing.expectEqual(Command{ .help = .main }, result);
 }
 
 test "--version flag returns version command" {
@@ -748,4 +764,28 @@ test "mine --json --version returns version with json=true" {
     const result = try parseArgs(allocator, &args);
     try std.testing.expectEqual(Command.version, std.meta.activeTag(result));
     try std.testing.expect(result.version.json);
+}
+
+test "mine --help returns mine help" {
+    const allocator = std.testing.allocator;
+    const args = [_][]const u8{ "mine", "--help" };
+
+    const result = try parseArgs(allocator, &args);
+    try std.testing.expectEqual(Command{ .help = .mine }, result);
+}
+
+test "team --help returns team help" {
+    const allocator = std.testing.allocator;
+    const args = [_][]const u8{ "team", "--help" };
+
+    const result = try parseArgs(allocator, &args);
+    try std.testing.expectEqual(Command{ .help = .team }, result);
+}
+
+test "merged --help returns merged help" {
+    const allocator = std.testing.allocator;
+    const args = [_][]const u8{ "merged", "--help" };
+
+    const result = try parseArgs(allocator, &args);
+    try std.testing.expectEqual(Command{ .help = .merged }, result);
 }
