@@ -15,6 +15,32 @@ pub const NamedTeamConfig = struct {
 pub const TeamsConfig = struct {
     default: ?[]const u8,
     teams: std.StringHashMapUnmanaged(NamedTeamConfig),
+
+    pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
+        if (self.default) |default_val| {
+            allocator.free(default_val);
+        }
+        var it = self.teams.iterator();
+        while (it.next()) |entry| {
+            allocator.free(entry.key_ptr.*);
+            const team_config = entry.value_ptr.*;
+            for (team_config.orgs) |org| {
+                allocator.free(org);
+            }
+            allocator.free(team_config.orgs);
+            for (team_config.members) |member| {
+                allocator.free(member);
+            }
+            allocator.free(team_config.members);
+            if (team_config.since) |since| {
+                allocator.free(since);
+            }
+            if (team_config.until) |until| {
+                allocator.free(until);
+            }
+        }
+        self.teams.deinit(allocator);
+    }
 };
 
 pub const Config = struct {
@@ -31,32 +57,7 @@ pub const Config = struct {
         }
         self.allocator.free(self.mine_orgs);
 
-        // Free teams default value
-        if (self.teams.default) |default_val| {
-            self.allocator.free(default_val);
-        }
-
-        // Free teams hash map
-        var it = self.teams.teams.iterator();
-        while (it.next()) |entry| {
-            self.allocator.free(entry.key_ptr.*);
-            const team_config = entry.value_ptr.*;
-            for (team_config.orgs) |org| {
-                self.allocator.free(org);
-            }
-            self.allocator.free(team_config.orgs);
-            for (team_config.members) |member| {
-                self.allocator.free(member);
-            }
-            self.allocator.free(team_config.members);
-            if (team_config.since) |since| {
-                self.allocator.free(since);
-            }
-            if (team_config.until) |until| {
-                self.allocator.free(until);
-            }
-        }
-        self.teams.teams.deinit(self.allocator);
+        self.teams.deinit(self.allocator);
 
         // Free auth token and user
         self.allocator.free(self.auth_token);
@@ -129,31 +130,7 @@ pub fn loadConfig(allocator: std.mem.Allocator) ConfigError!Config {
         .default = null,
         .teams = std.StringHashMapUnmanaged(NamedTeamConfig){},
     };
-    errdefer {
-        if (teams.default) |default_val| {
-            allocator.free(default_val);
-        }
-        var it = teams.teams.iterator();
-        while (it.next()) |entry| {
-            allocator.free(entry.key_ptr.*);
-            const team_config = entry.value_ptr.*;
-            for (team_config.orgs) |org| {
-                allocator.free(org);
-            }
-            allocator.free(team_config.orgs);
-            for (team_config.members) |member| {
-                allocator.free(member);
-            }
-            allocator.free(team_config.members);
-            if (team_config.since) |since| {
-                allocator.free(since);
-            }
-            if (team_config.until) |until| {
-                allocator.free(until);
-            }
-        }
-        teams.teams.deinit(allocator);
-    }
+    errdefer teams.deinit(allocator);
 
     if (root.object.get("teams")) |teams_value| {
         teams = try parseTeamsConfig(allocator, teams_value);
@@ -245,31 +222,7 @@ fn parseTeamsConfig(allocator: std.mem.Allocator, teams_value: std.json.Value) C
         .default = null,
         .teams = std.StringHashMapUnmanaged(NamedTeamConfig){},
     };
-    errdefer {
-        if (result.default) |default_val| {
-            allocator.free(default_val);
-        }
-        var it = result.teams.iterator();
-        while (it.next()) |entry| {
-            allocator.free(entry.key_ptr.*);
-            const team_config = entry.value_ptr.*;
-            for (team_config.orgs) |org| {
-                allocator.free(org);
-            }
-            allocator.free(team_config.orgs);
-            for (team_config.members) |member| {
-                allocator.free(member);
-            }
-            allocator.free(team_config.members);
-            if (team_config.since) |since| {
-                allocator.free(since);
-            }
-            if (team_config.until) |until| {
-                allocator.free(until);
-            }
-        }
-        result.teams.deinit(allocator);
-    }
+    errdefer result.deinit(allocator);
 
     // Parse default field if present
     if (teams_value.object.get("default")) |default_value| {

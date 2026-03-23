@@ -1,5 +1,44 @@
 const std = @import("std");
 
+pub fn parseIso8601Timestamp(iso_string: []const u8) !i64 {
+    // Parse ISO 8601 timestamp to Unix timestamp
+    // Example format: "2024-01-15T12:34:56Z"
+
+    // Simple parser for GitHub's ISO 8601 format
+    if (iso_string.len < 19) return error.ParseError;
+
+    const year = std.fmt.parseInt(i32, iso_string[0..4], 10) catch return error.ParseError;
+    const month = std.fmt.parseInt(u8, iso_string[5..7], 10) catch return error.ParseError;
+    const day = std.fmt.parseInt(u8, iso_string[8..10], 10) catch return error.ParseError;
+    const hour = std.fmt.parseInt(u8, iso_string[11..13], 10) catch return error.ParseError;
+    const minute = std.fmt.parseInt(u8, iso_string[14..16], 10) catch return error.ParseError;
+    const second = std.fmt.parseInt(u8, iso_string[17..19], 10) catch return error.ParseError;
+
+    // Calculate Unix timestamp (days since epoch * seconds per day + time of day)
+    const days_since_epoch = daysSinceEpoch(year, month, day);
+    const seconds_in_day = @as(i64, hour) * 3600 + @as(i64, minute) * 60 + @as(i64, second);
+
+    return days_since_epoch * 86400 + seconds_in_day;
+}
+
+fn daysSinceEpoch(year: i32, month: u8, day: u8) i64 {
+    // Unix epoch: January 1, 1970
+    var y = year;
+    var m = month;
+
+    // Adjust for months (Mar=1..Dec=10, Jan=11, Feb=12)
+    if (m <= 2) {
+        y -= 1;
+        m += 12;
+    }
+
+    const days_in_year = 365 * y;
+    const leap_days = @divFloor(y, 4) - @divFloor(y, 100) + @divFloor(y, 400);
+    const days_in_months = @divFloor(153 * @as(i64, m - 3) + 2, 5);
+    const total_days = @as(i64, days_in_year) + leap_days + days_in_months + @as(i64, day) - 719469;
+
+    return total_days;
+}
 /// Get the current date in YYYY-MM-DD format
 pub fn getCurrentDate(allocator: std.mem.Allocator) ![]const u8 {
     const timestamp = std.time.timestamp();
@@ -234,4 +273,20 @@ test "getDateDaysAgo with 0 days returns today" {
     defer allocator.free(zero_days_ago);
 
     try std.testing.expectEqualStrings(today, zero_days_ago);
+}
+
+test "parseIso8601Timestamp" {
+    // Test known timestamp: 2024-01-15T12:34:56Z
+    const timestamp = try parseIso8601Timestamp("2024-01-15T12:34:56Z");
+
+    // Expected: January 15, 2024, 12:34:56 UTC
+    // This is approximately 1705322096 (verified with external tools)
+    try std.testing.expect(timestamp > 1705322000);
+    try std.testing.expect(timestamp < 1705323000);
+}
+
+test "parseIso8601Timestamp epoch" {
+    // Test Unix epoch: 1970-01-01T00:00:00Z
+    const timestamp = try parseIso8601Timestamp("1970-01-01T00:00:00Z");
+    try std.testing.expectEqual(@as(i64, 0), timestamp);
 }

@@ -9,7 +9,7 @@ const formatter = git_prs.formatter;
 const time = git_prs.time;
 
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}).init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -22,6 +22,8 @@ pub fn main() !void {
 
     // Skip the program name (args[0])
     const cli_args = if (args.len > 1) args[1..] else args[0..0];
+    var buf: [4096]u8 = undefined;
+    var fbs = std.io.fixedBufferStream(&buf);
 
     const command = cli.parseArgs(allocator, cli_args) catch |err| {
         switch (err) {
@@ -47,8 +49,6 @@ pub fn main() !void {
                 _ = try stderr.write("Invalid days value. Must be a number.\n");
             },
         }
-        var buf: [4096]u8 = undefined;
-        var fbs = std.io.fixedBufferStream(&buf);
         cli.printUsage(fbs.writer()) catch {};
         _ = stderr.write(fbs.getWritten()) catch {};
         std.process.exit(1);
@@ -56,15 +56,13 @@ pub fn main() !void {
 
     switch (command) {
         .help => |help_target| {
-            var buf: [4096]u8 = undefined;
-            var fbs = std.io.fixedBufferStream(&buf);
             switch (help_target) {
-                .main => cli.printUsage(fbs.writer()) catch {},
-                .mine => cli.printMineHelp(fbs.writer()) catch {},
-                .team => cli.printTeamHelp(fbs.writer()) catch {},
-                .merged => cli.printMergedHelp(fbs.writer()) catch {},
+                .main => try cli.printUsage(fbs.writer()),
+                .mine => try cli.printMineHelp(fbs.writer()),
+                .team => try cli.printTeamHelp(fbs.writer()),
+                .merged => try cli.printMergedHelp(fbs.writer()),
             }
-            _ = stdout.write(fbs.getWritten()) catch {};
+            _ = try stdout.write(fbs.getWritten());
             return;
         },
         .version => |version_args| {
