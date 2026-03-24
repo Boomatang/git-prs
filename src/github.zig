@@ -30,36 +30,36 @@ pub const PullRequest = struct {
     pub fn json(self: @This(), writer: anytype) !void {
         try writer.writeAll("{");
 
-        try writer.writeAll("\n\t\"org\":");
+        try writer.writeAll("\"org\":");
         try formater.writeJsonString(writer, self.org);
 
-        try writer.writeAll(",\n\t\"repo\":");
+        try writer.writeAll(",\"repo\":");
         try formater.writeJsonString(writer, self.repo);
 
-        try writer.print(",\n\t\"number\":{d}", .{self.number});
+        try writer.print(",\"number\":{d}", .{self.number});
 
-        try writer.writeAll(",\n\t\"title\":");
+        try writer.writeAll(",\"title\":");
         try formater.writeJsonString(writer, self.title);
 
-        try writer.writeAll(",\n\t\"url\":");
+        try writer.writeAll(",\"url\":");
         try formater.writeJsonString(writer, self.url);
 
-        try writer.writeAll(",\n\t\"author\":");
+        try writer.writeAll(",\"author\":");
         try formater.writeJsonString(writer, self.author);
 
-        try writer.print(",\n\t\"created_at\":{d}", .{self.created_at});
+        try writer.print(",\"created_at\":{d}", .{self.created_at});
 
         if (self.last_comment_at) |last| {
-            try writer.print(",\n\t\"last_comment_at\":{d}", .{last});
+            try writer.print(",\"last_comment_at\":{d}", .{last});
         } else {
-            try writer.writeAll(",\n\t\"last_comment_at\":null");
+            try writer.writeAll(",\"last_comment_at\":null");
         }
 
-        try writer.print(",\n\t\"unique_commenters\":{d}", .{self.unique_commenters});
+        try writer.print(",\"unique_commenters\":{d}", .{self.unique_commenters});
 
-        try writer.print(",\n\t\"is_draft\":{s}", .{if (self.is_draft) "true" else "false"});
+        try writer.print(",\"is_draft\":{s}", .{if (self.is_draft) "true" else "false"});
 
-        try writer.writeAll("\n}");
+        try writer.writeAll("}");
     }
 };
 
@@ -468,7 +468,7 @@ fn parsePullRequestFromGraphQL(allocator: std.mem.Allocator, obj: std.json.Objec
         if (comments_obj == .object) {
             if (comments_obj.object.get("nodes")) |comment_nodes| {
                 if (comment_nodes == .array) {
-                    const analysis = analyzeComments(allocator, comment_nodes.array, author_str);
+                    const analysis = try analyzeComments(allocator, comment_nodes.array, author_str);
                     last_comment_at = analysis.last_comment_at;
                     unique_commenters = analysis.unique_commenters;
                 }
@@ -499,7 +499,7 @@ fn analyzeComments(
     allocator: std.mem.Allocator,
     comments: std.json.Array,
     pr_author: []const u8,
-) CommentAnalysis {
+) !CommentAnalysis {
     var last_timestamp: ?i64 = null;
     var commenter_set = std.StringHashMap(void).init(allocator);
     defer commenter_set.deinit();
@@ -527,7 +527,7 @@ fn analyzeComments(
 
         // Add to unique commenters set (excluding PR author)
         if (!std.mem.eql(u8, comment_author, pr_author)) {
-            commenter_set.put(comment_author, {}) catch {};
+            try commenter_set.put(comment_author, {});
         }
     }
 

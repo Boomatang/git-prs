@@ -50,7 +50,7 @@ pub const Config = struct {
     auth_token: []const u8,
     authenticated_user: []const u8,
 
-    pub fn deinit(self: *Config) void {
+    pub fn deinit(self: *@This()) void {
         // Free mine_orgs strings and array
         for (self.mine_orgs) |org| {
             self.allocator.free(org);
@@ -89,14 +89,14 @@ pub const ConfigError = error{
 /// Load configuration from XDG config directory.
 /// Calls `gh auth token` to get auth token.
 /// Does NOT call GitHub API to get authenticated user - that's the caller's responsibility.
-pub fn loadConfig(allocator: std.mem.Allocator) ConfigError!Config {
+pub fn loadConfig(allocator: std.mem.Allocator) !Config {
     const config_path = try getConfigPath(allocator);
     defer allocator.free(config_path);
 
     // Read config file
     const config_file = fs.openFileAbsolute(config_path, .{}) catch |err| {
         if (err == error.FileNotFound) {
-            printConfigNotFoundError();
+            try printConfigNotFoundError();
             return ConfigError.ConfigNotFound;
         }
         return err;
@@ -343,13 +343,13 @@ fn parseTeamsConfig(allocator: std.mem.Allocator, teams_value: std.json.Value) C
 }
 
 /// Get GitHub auth token by running `gh auth token`
-fn getAuthToken(allocator: std.mem.Allocator) ConfigError![]const u8 {
+fn getAuthToken(allocator: std.mem.Allocator) ![]const u8 {
     const result = process.Child.run(.{
         .allocator = allocator,
         .argv = &[_][]const u8{ "gh", "auth", "token" },
     }) catch |err| {
         if (err == error.FileNotFound) {
-            printGhNotInstalledError();
+            try printGhNotInstalledError();
             return ConfigError.GhNotInstalled;
         }
         return err;
@@ -358,7 +358,7 @@ fn getAuthToken(allocator: std.mem.Allocator) ConfigError![]const u8 {
     defer allocator.free(result.stderr);
 
     if (result.term.Exited != 0) {
-        printNotAuthenticatedError();
+        try printNotAuthenticatedError();
         return ConfigError.NotAuthenticated;
     }
 
@@ -366,14 +366,14 @@ fn getAuthToken(allocator: std.mem.Allocator) ConfigError![]const u8 {
     return try allocator.dupe(u8, token);
 }
 
-fn printConfigNotFoundError() void {
+fn printConfigNotFoundError() !void {
     const stderr = std.fs.File.stderr();
-    _ = stderr.write("Config not found. Create ~/.config/git-prs/config.json\n\n") catch {};
-    _ = stderr.write("Example:\n") catch {};
-    _ = stderr.write(
+    _ = try stderr.write("Config not found. Create ~/.config/git-prs/config.json\n\n");
+    _ = try stderr.write("Example:\n");
+    _ = try stderr.write(
         \\{
         \\  "mine": {
-        \\    "orgs": ["jfitzpat", "kubernetes", "my-company"]
+        \\    "orgs": ["boomatang", "kubernetes", "my-company"]
         \\  },
         \\  "teams": {
         \\    "default": "release",
@@ -389,18 +389,18 @@ fn printConfigNotFoundError() void {
         \\  }
         \\}
         \\
-    ) catch {};
-    _ = stderr.write("\n") catch {};
+    );
+    _ = try stderr.write("\n");
 }
 
-fn printGhNotInstalledError() void {
+fn printGhNotInstalledError() !void {
     const stderr = std.fs.File.stderr();
-    _ = stderr.write("gh CLI not found. Install from https://cli.github.com\n") catch {};
+    _ = try stderr.write("gh CLI not found. Install from https://cli.github.com\n");
 }
 
-fn printNotAuthenticatedError() void {
+fn printNotAuthenticatedError() !void {
     const stderr = std.fs.File.stderr();
-    _ = stderr.write("Not authenticated. Run `gh auth login` first\n") catch {};
+    _ = try stderr.write("Not authenticated. Run `gh auth login` first\n");
 }
 
 // Tests

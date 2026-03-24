@@ -49,8 +49,8 @@ pub fn main() !void {
                 _ = try stderr.write("Invalid days value. Must be a number.\n");
             },
         }
-        cli.printUsage(fbs.writer()) catch {};
-        _ = stderr.write(fbs.getWritten()) catch {};
+        try cli.printUsage(fbs.writer());
+        _ = try stderr.write(fbs.getWritten());
         std.process.exit(1);
     };
 
@@ -93,7 +93,7 @@ fn runMineCommand(
 ) !void {
     // Load config
     var cfg = config.loadConfig(allocator) catch |err| {
-        handleConfigError(err, stderr);
+        try handleConfigError(err, stderr);
         std.process.exit(1);
     };
     defer cfg.deinit();
@@ -104,14 +104,14 @@ fn runMineCommand(
 
     // Get authenticated user (needed for @me queries)
     const user = github.getAuthenticatedUser(&client) catch |err| {
-        handleGitHubError(err, stderr);
+        try handleGitHubError(err, stderr);
         std.process.exit(1);
     };
     defer allocator.free(user);
 
     // Fetch PRs with date filters from CLI
     const prs = github.fetchUserPRs(&client, cfg.mine_orgs, args.org_filter, args.limit, args.since, args.until) catch |err| {
-        handleGitHubError(err, stderr);
+        try handleGitHubError(err, stderr);
         std.process.exit(1);
     };
     defer {
@@ -143,7 +143,7 @@ fn runTeamCommand(
 ) !void {
     // Load config
     var cfg = config.loadConfig(allocator) catch |err| {
-        handleConfigError(err, stderr);
+        try handleConfigError(err, stderr);
         std.process.exit(1);
     };
     defer cfg.deinit();
@@ -155,7 +155,7 @@ fn runTeamCommand(
             if (!cfg.teams.teams.contains(team_name)) {
                 var buf: [256]u8 = undefined;
                 const msg = std.fmt.bufPrint(&buf, "Team '{s}' not found in config\n", .{team_name}) catch "Team not found\n";
-                _ = stderr.write(msg) catch {};
+                _ = try stderr.write(msg);
                 std.process.exit(1);
             }
             break :blk team_name;
@@ -169,7 +169,7 @@ fn runTeamCommand(
         // 3. If only one team, auto-select
         const team_count = cfg.teams.teams.count();
         if (team_count == 0) {
-            _ = stderr.write("No teams configured in config file\n") catch {};
+            _ = try stderr.write("No teams configured in config file\n");
             std.process.exit(1);
         } else if (team_count == 1) {
             var it = cfg.teams.teams.iterator();
@@ -180,18 +180,18 @@ fn runTeamCommand(
         }
 
         // 4. Multiple teams without default and no explicit name -> error
-        _ = stderr.write("Multiple teams configured. Specify team name or set default in config.\n") catch {};
-        _ = stderr.write("Available teams: ") catch {};
+        _ = try stderr.write("Multiple teams configured. Specify team name or set default in config.\n");
+        _ = try stderr.write("Available teams: ");
         var it = cfg.teams.teams.iterator();
         var first = true;
         while (it.next()) |entry| {
             if (!first) {
-                _ = stderr.write(", ") catch {};
+                _ = try stderr.write(", ");
             }
-            _ = stderr.write(entry.key_ptr.*) catch {};
+            _ = try stderr.write(entry.key_ptr.*);
             first = false;
         }
-        _ = stderr.write("\n") catch {};
+        _ = try stderr.write("\n");
         std.process.exit(1);
     };
 
@@ -199,7 +199,7 @@ fn runTeamCommand(
     const team_config = cfg.teams.teams.get(selected_team_name) orelse {
         var buf: [256]u8 = undefined;
         const msg = std.fmt.bufPrint(&buf, "Team '{s}' not found in config\n", .{selected_team_name}) catch "Team not found\n";
-        _ = stderr.write(msg) catch {};
+        _ = try stderr.write(msg);
         std.process.exit(1);
     };
 
@@ -229,7 +229,7 @@ fn runTeamCommand(
         }
 
         const prs = github.fetchTeamPRs(&client, org, team_config.members, args.member_filter, effective_since, effective_until) catch |err| {
-            handleGitHubError(err, stderr);
+            try handleGitHubError(err, stderr);
             std.process.exit(1);
         };
         defer allocator.free(prs);
@@ -261,7 +261,7 @@ fn runMergedCommand(
 ) !void {
     // Load config
     var cfg = config.loadConfig(allocator) catch |err| {
-        handleConfigError(err, stderr);
+        try handleConfigError(err, stderr);
         std.process.exit(1);
     };
     defer cfg.deinit();
@@ -272,7 +272,7 @@ fn runMergedCommand(
 
     // Get authenticated user (needed for @me queries)
     const user = github.getAuthenticatedUser(&client) catch |err| {
-        handleGitHubError(err, stderr);
+        try handleGitHubError(err, stderr);
         std.process.exit(1);
     };
     defer allocator.free(user);
@@ -283,7 +283,7 @@ fn runMergedCommand(
         since
     else blk: {
         const date = time.getDateDaysAgo(allocator, days_to_use) catch {
-            _ = stderr.write("Failed to calculate date range\n") catch {};
+            _ = try stderr.write("Failed to calculate date range\n");
             std.process.exit(1);
         };
         break :blk date;
@@ -296,7 +296,7 @@ fn runMergedCommand(
 
     // Fetch merged PRs with date filters
     const prs = github.fetchMergedPRs(&client, cfg.mine_orgs, args.org_filter, since_date, args.until) catch |err| {
-        handleGitHubError(err, stderr);
+        try handleGitHubError(err, stderr);
         std.process.exit(1);
     };
     defer {
@@ -319,40 +319,40 @@ fn runMergedCommand(
     _ = try stdout.write(fbs.getWritten());
 }
 
-fn handleConfigError(err: anyerror, stderr: std.fs.File) void {
+fn handleConfigError(err: anyerror, stderr: std.fs.File) !void {
     switch (err) {
         error.ConfigNotFound => {
             // Error message already printed by config module
         },
         error.InvalidJson => {
-            _ = stderr.write("Invalid config: JSON parse error\n") catch {};
+            _ = try stderr.write("Invalid config: JSON parse error\n");
         },
         error.MissingMineOrgs => {
-            _ = stderr.write("Config error: mine.orgs must contain at least one org\n") catch {};
+            _ = try stderr.write("Config error: mine.orgs must contain at least one org\n");
         },
         error.EmptyMineOrgs => {
-            _ = stderr.write("Config error: mine.orgs must contain at least one org\n") catch {};
+            _ = try stderr.write("Config error: mine.orgs must contain at least one org\n");
         },
         error.EmptyOrgName => {
-            _ = stderr.write("Config error: mine.orgs contains empty org name\n") catch {};
+            _ = try stderr.write("Config error: mine.orgs contains empty org name\n");
         },
         error.EmptyTeamMembers => {
-            _ = stderr.write("Config error: team has no members listed\n") catch {};
+            _ = try stderr.write("Config error: team has no members listed\n");
         },
         error.EmptyTeamOrgs => {
-            _ = stderr.write("Config error: team has empty orgs array\n") catch {};
+            _ = try stderr.write("Config error: team has empty orgs array\n");
         },
         error.MissingTeamOrgs => {
-            _ = stderr.write("Config error: team must have 'orgs' field\n") catch {};
+            _ = try stderr.write("Config error: team must have 'orgs' field\n");
         },
         error.InvalidDefaultTeam => {
-            _ = stderr.write("Config error: 'default' references non-existent team\n") catch {};
+            _ = try stderr.write("Config error: 'default' references non-existent team\n");
         },
         error.NoDefaultTeam => {
-            _ = stderr.write("Config error: multiple teams configured but no default specified\n") catch {};
+            _ = try stderr.write("Config error: multiple teams configured but no default specified\n");
         },
         error.InvalidDateFormat => {
-            _ = stderr.write("Config error: Invalid date format. Use YYYY-MM-DD format.\n") catch {};
+            _ = try stderr.write("Config error: Invalid date format. Use YYYY-MM-DD format.\n");
         },
         error.GhNotInstalled => {
             // Error message already printed by config module
@@ -361,30 +361,30 @@ fn handleConfigError(err: anyerror, stderr: std.fs.File) void {
             // Error message already printed by config module
         },
         else => {
-            _ = stderr.write("Failed to load config\n") catch {};
+            _ = try stderr.write("Failed to load config\n");
         },
     }
 }
 
-fn handleGitHubError(err: anyerror, stderr: std.fs.File) void {
+fn handleGitHubError(err: anyerror, stderr: std.fs.File) !void {
     switch (err) {
         error.AuthError => {
-            _ = stderr.write("Authentication failed. Your token may have expired. Run `gh auth login`.\n") catch {};
+            _ = try stderr.write("Authentication failed. Your token may have expired. Run `gh auth login`.\n");
         },
         error.RateLimitExceeded => {
-            _ = stderr.write("GitHub API rate limit exceeded. Try again later.\n") catch {};
+            _ = try stderr.write("GitHub API rate limit exceeded. Try again later.\n");
         },
         error.NetworkError => {
-            _ = stderr.write("Failed to reach GitHub API. Check your network connection.\n") catch {};
+            _ = try stderr.write("Failed to reach GitHub API. Check your network connection.\n");
         },
         error.ParseError => {
-            _ = stderr.write("Failed to parse GitHub API response.\n") catch {};
+            _ = try stderr.write("Failed to parse GitHub API response.\n");
         },
         error.GhCommandFailed => {
-            _ = stderr.write("GitHub CLI command failed.\n") catch {};
+            _ = try stderr.write("GitHub CLI command failed.\n");
         },
         else => {
-            _ = stderr.write("GitHub API error\n") catch {};
+            _ = try stderr.write("GitHub API error\n");
         },
     }
 }
