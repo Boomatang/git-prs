@@ -1,4 +1,6 @@
 const std = @import("std");
+const formater = @import("formatter.zig");
+const time = @import("time.zig");
 
 // ============================================================================
 // Public Data Structures
@@ -22,6 +24,42 @@ pub const PullRequest = struct {
         allocator.free(self.title);
         allocator.free(self.url);
         allocator.free(self.author);
+    }
+
+    /// Format a single PR as JSON object
+    pub fn json(self: @This(), writer: anytype) !void {
+        try writer.writeAll("{");
+
+        try writer.writeAll("\"org\":");
+        try formater.writeJsonString(writer, self.org);
+
+        try writer.writeAll(",\"repo\":");
+        try formater.writeJsonString(writer, self.repo);
+
+        try writer.print(",\"number\":{d}", .{self.number});
+
+        try writer.writeAll(",\"title\":");
+        try formater.writeJsonString(writer, self.title);
+
+        try writer.writeAll(",\"url\":");
+        try formater.writeJsonString(writer, self.url);
+
+        try writer.writeAll(",\"author\":");
+        try formater.writeJsonString(writer, self.author);
+
+        try writer.print(",\"created_at\":{d}", .{self.created_at});
+
+        if (self.last_comment_at) |last| {
+            try writer.print(",\"last_comment_at\":{d}", .{last});
+        } else {
+            try writer.writeAll(",\"last_comment_at\":null");
+        }
+
+        try writer.print(",\"unique_commenters\":{d}", .{self.unique_commenters});
+
+        try writer.print(",\"is_draft\":{s}", .{if (self.is_draft) "true" else "false"});
+
+        try writer.writeAll("}");
     }
 };
 
@@ -174,9 +212,7 @@ pub fn fetchMergedPRs(
         const prs = try fetchMergedPRsWithGh(client, org, since, until);
         defer client.allocator.free(prs);
 
-        for (prs) |pr| {
-            try all_prs.append(client.allocator, pr);
-        }
+        try all_prs.appendSlice(client.allocator, prs);
     }
 
     return all_prs.toOwnedSlice(client.allocator);
@@ -258,7 +294,7 @@ fn fetchPRsWithGh(
     const result = std.process.Child.run(.{
         .allocator = client.allocator,
         .argv = &.{
-            "gh", "api", "graphql",
+            "gh", "api",       "graphql",
             "-f", query_param,
         },
     }) catch return error.GhCommandFailed;
@@ -342,7 +378,7 @@ fn fetchMergedPRsWithGh(
     const result = std.process.Child.run(.{
         .allocator = client.allocator,
         .argv = &.{
-            "gh", "api", "graphql",
+            "gh", "api",       "graphql",
             "-f", query_param,
         },
     }) catch return error.GhCommandFailed;
@@ -407,8 +443,7 @@ fn parsePullRequestFromGraphQL(allocator: std.mem.Allocator, obj: std.json.Objec
     else if (author_obj == .object) blk: {
         const login = author_obj.object.get("login") orelse return error.ParseError;
         break :blk login.string;
-    } else
-        return error.ParseError;
+    } else return error.ParseError;
 
     // Parse repository
     if (repository != .object) return error.ParseError;
@@ -420,7 +455,7 @@ fn parsePullRequestFromGraphQL(allocator: std.mem.Allocator, obj: std.json.Objec
     const owner_login = owner.object.get("login") orelse return error.ParseError;
 
     // Parse timestamps
-    const created_at = try parseIso8601Timestamp(created_at_str.string);
+    const created_at = try time.parseIso8601Timestamp(created_at_str.string);
 
     // Parse is_draft boolean
     const is_draft = if (is_draft_value == .bool) is_draft_value.bool else false;
@@ -433,7 +468,7 @@ fn parsePullRequestFromGraphQL(allocator: std.mem.Allocator, obj: std.json.Objec
         if (comments_obj == .object) {
             if (comments_obj.object.get("nodes")) |comment_nodes| {
                 if (comment_nodes == .array) {
-                    const analysis = analyzeComments(allocator, comment_nodes.array, author_str);
+                    const analysis = try analyzeComments(allocator, comment_nodes.array, author_str);
                     last_comment_at = analysis.last_comment_at;
                     unique_commenters = analysis.unique_commenters;
                 }
@@ -464,7 +499,7 @@ fn analyzeComments(
     allocator: std.mem.Allocator,
     comments: std.json.Array,
     pr_author: []const u8,
-) CommentAnalysis {
+) !CommentAnalysis {
     var last_timestamp: ?i64 = null;
     var commenter_set = std.StringHashMap(void).init(allocator);
     defer commenter_set.deinit();
@@ -481,10 +516,9 @@ fn analyzeComments(
         else if (author_obj == .object) blk: {
             const login = author_obj.object.get("login") orelse continue;
             break :blk login.string;
-        } else
-            continue;
+        } else continue;
 
-        const timestamp = parseIso8601Timestamp(created_at_str.string) catch continue;
+        const timestamp = time.parseIso8601Timestamp(created_at_str.string) catch continue;
 
         // Update last_timestamp if this is newer
         if (last_timestamp == null or timestamp > last_timestamp.?) {
@@ -493,7 +527,7 @@ fn analyzeComments(
 
         // Add to unique commenters set (excluding PR author)
         if (!std.mem.eql(u8, comment_author, pr_author)) {
-            commenter_set.put(comment_author, {}) catch {};
+            try commenter_set.put(comment_author, {});
         }
     }
 
@@ -503,65 +537,9 @@ fn analyzeComments(
     };
 }
 
-fn parseIso8601Timestamp(iso_string: []const u8) GitHubError!i64 {
-    // Parse ISO 8601 timestamp to Unix timestamp
-    // Example format: "2024-01-15T12:34:56Z"
-
-    // Simple parser for GitHub's ISO 8601 format
-    if (iso_string.len < 19) return error.ParseError;
-
-    const year = std.fmt.parseInt(i32, iso_string[0..4], 10) catch return error.ParseError;
-    const month = std.fmt.parseInt(u8, iso_string[5..7], 10) catch return error.ParseError;
-    const day = std.fmt.parseInt(u8, iso_string[8..10], 10) catch return error.ParseError;
-    const hour = std.fmt.parseInt(u8, iso_string[11..13], 10) catch return error.ParseError;
-    const minute = std.fmt.parseInt(u8, iso_string[14..16], 10) catch return error.ParseError;
-    const second = std.fmt.parseInt(u8, iso_string[17..19], 10) catch return error.ParseError;
-
-    // Calculate Unix timestamp (days since epoch * seconds per day + time of day)
-    const days_since_epoch = daysSinceEpoch(year, month, day);
-    const seconds_in_day = @as(i64, hour) * 3600 + @as(i64, minute) * 60 + @as(i64, second);
-
-    return days_since_epoch * 86400 + seconds_in_day;
-}
-
-fn daysSinceEpoch(year: i32, month: u8, day: u8) i64 {
-    // Unix epoch: January 1, 1970
-    var y = year;
-    var m = month;
-
-    // Adjust for months (Mar=1..Dec=10, Jan=11, Feb=12)
-    if (m <= 2) {
-        y -= 1;
-        m += 12;
-    }
-
-    const days_in_year = 365 * y;
-    const leap_days = @divFloor(y, 4) - @divFloor(y, 100) + @divFloor(y, 400);
-    const days_in_months = @divFloor(153 * @as(i64, m - 3) + 2, 5);
-    const total_days = @as(i64, days_in_year) + leap_days + days_in_months + @as(i64, day) - 719469;
-
-    return total_days;
-}
-
 // ============================================================================
 // Tests
 // ============================================================================
-
-test "parseIso8601Timestamp" {
-    // Test known timestamp: 2024-01-15T12:34:56Z
-    const timestamp = try parseIso8601Timestamp("2024-01-15T12:34:56Z");
-
-    // Expected: January 15, 2024, 12:34:56 UTC
-    // This is approximately 1705322096 (verified with external tools)
-    try std.testing.expect(timestamp > 1705322000);
-    try std.testing.expect(timestamp < 1705323000);
-}
-
-test "parseIso8601Timestamp epoch" {
-    // Test Unix epoch: 1970-01-01T00:00:00Z
-    const timestamp = try parseIso8601Timestamp("1970-01-01T00:00:00Z");
-    try std.testing.expectEqual(@as(i64, 0), timestamp);
-}
 
 test "Client init and deinit" {
     const allocator = std.testing.allocator;
