@@ -15,6 +15,7 @@ A CLI tool to view your GitHub pull requests
 - **Case-insensitive org filtering** - match orgs regardless of capitalization
 - **JSON output for scripting** - use `--json` flag for machine-readable output
 - **Age and comment tracking** - see how old each PR is and comment counts
+- **Changelog management** - integrated [Changie](https://github.com/miniscruff/changie) for tracking changes
 
 ## Prerequisites
 
@@ -52,6 +53,24 @@ zig build
 ```
 
 This will display all your open pull requests across the configured organizations.
+
+## Changelog Management
+
+This project uses [Changie](https://github.com/miniscruff/changie) for changelog management, integrated via the Zig build system.
+
+```bash
+# Add a new changelog entry (interactive)
+zig build changie:add
+
+# Batch unreleased entries for a version
+zig build changie:batch
+
+# Merge batched versions into CHANGELOG.md
+zig build changie:merge
+
+# Print the changie version
+zig build changie:version
+```
 
 ## Documentation
 
