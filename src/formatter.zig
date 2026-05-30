@@ -456,7 +456,7 @@ pub fn formatTeamOutput(
 }
 
 /// Write a JSON-escaped string
-fn writeJsonString(writer: anytype, s: []const u8) !void {
+pub fn writeJsonString(writer: anytype, s: []const u8) !void {
     try writer.writeByte('"');
     for (s) |c| {
         switch (c) {
@@ -524,7 +524,7 @@ pub fn formatJsonOutput(
         if (i > 0) {
             try writer.writeByte(',');
         }
-        try formatPrAsJson(writer, pr);
+        try pr.json(writer);
     }
 
     try writer.writeAll("]\n");
