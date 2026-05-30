@@ -1,4 +1,5 @@
 const std = @import("std");
+const zon = @import("build.zig.zon");
 
 // Although this function looks imperative, it does not perform the build
 // directly and instead it mutates the build graph (`b`) that will be then
@@ -20,9 +21,6 @@ pub fn build(b: *std.Build) void {
     // of this build script using `b.option()`. All defined flags (including
     // target and optimize options) will be listed when running `zig build --help`
     // in this directory.
-
-    // Read version and name from build.zig.zon
-    const zon = @import("build.zig.zon");
 
     // Add clap dependency
     const clap = b.dependency("clap", .{});
@@ -352,4 +350,62 @@ pub fn build(b: *std.Build) void {
 
     // Add gh release command to release step
     release_step.dependOn(&gh_release_cmd.step);
+
+    // Set Up Changie Commands
+    // WARNING: build() returns early here if changie deps are not fetched.
+    // Do NOT add build steps after the changie block — they will be silently hidden.
+    const changie_bin = get_changie_bin(b) orelse return;
+
+    // Changie Add
+    const changie_add = std.Build.Step.Run.create(b, "run changie");
+    changie_add.addFileArg(changie_bin);
+    changie_add.addArg("new");
+    const changie_add_cmd = b.step("changie:add", "Add change log fragment");
+    changie_add_cmd.dependOn(&changie_add.step);
+
+    // Changie batch
+    const changie_batch = std.Build.Step.Run.create(b, "run changie");
+    changie_batch.addFileArg(changie_bin);
+    changie_batch.addArg("batch");
+    changie_batch.addArg(zon.version);
+    const changie_batch_cmd = b.step("changie:batch", "Batch fragments for a release");
+    changie_batch_cmd.dependOn(&changie_batch.step);
+
+    // Changie merge
+    const changie_merge = std.Build.Step.Run.create(b, "run changie");
+    changie_merge.addFileArg(changie_bin);
+    changie_merge.addArg("merge");
+    const changie_merge_cmd = b.step("changie:merge", "Merge all changes into CHANGELOG.md");
+    changie_merge_cmd.dependOn(&changie_merge.step);
+
+    // Changie Version
+    const changie_version = std.Build.Step.Run.create(b, "run changie");
+    changie_version.addFileArg(changie_bin);
+    changie_version.addArg("--version");
+    const changie_version_cmd = b.step("changie:version", "Print the changie version");
+    changie_version_cmd.dependOn(&changie_version.step);
+}
+
+fn get_changie_bin(b: *std.Build) ?std.Build.LazyPath {
+    const host = b.graph.host.result;
+    const name = switch (host.os.tag) {
+        .linux => switch (host.cpu.arch) {
+            .x86_64 => "changie_linux_amd64",
+            .aarch64 => "changie_linux_arm64",
+            else => return null,
+        },
+        .macos => switch (host.cpu.arch) {
+            .x86_64 => "changie_darwin_amd64",
+            .aarch64 => "changie_darwin_arm64",
+            else => return null,
+        },
+
+        else => return null,
+    };
+
+    if (b.lazyDependency(name, .{})) |dep| {
+        return dep.path("changie");
+    } else {
+        return null;
+    }
 }
