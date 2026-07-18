@@ -1,8 +1,8 @@
 const std = @import("std");
 
 /// Get the current date in YYYY-MM-DD format
-pub fn getCurrentDate(allocator: std.mem.Allocator) ![]const u8 {
-    const timestamp = std.time.timestamp();
+pub fn getCurrentDate(allocator: std.mem.Allocator, io: std.Io) ![]const u8 {
+    const timestamp = std.Io.Timestamp.now(io, .real).toSeconds();
     return formatTimestampAsDate(allocator, timestamp);
 }
 
@@ -21,8 +21,8 @@ pub fn formatTimestampAsDate(allocator: std.mem.Allocator, timestamp: i64) ![]co
 }
 
 /// Calculate date N days ago from today in YYYY-MM-DD format
-pub fn getDateDaysAgo(allocator: std.mem.Allocator, days: u32) ![]const u8 {
-    const current_timestamp = std.time.timestamp();
+pub fn getDateDaysAgo(allocator: std.mem.Allocator, days: u32, io: std.Io) ![]const u8 {
+    const current_timestamp = std.Io.Timestamp.now(io, .real).toSeconds();
     const seconds_per_day: i64 = 86400;
     const days_ago_timestamp = current_timestamp - (@as(i64, days) * seconds_per_day);
     return formatTimestampAsDate(allocator, days_ago_timestamp);
@@ -178,7 +178,7 @@ test "formatDuration: negative durations" {
 
 test "getCurrentDate returns YYYY-MM-DD format" {
     const allocator = std.testing.allocator;
-    const date = try getCurrentDate(allocator);
+    const date = try getCurrentDate(allocator, std.testing.io);
     defer allocator.free(date);
 
     // Should be exactly 10 characters
@@ -214,8 +214,7 @@ test "formatTimestampAsDate handles various dates" {
 test "getDateDaysAgo returns date N days ago" {
     const allocator = std.testing.allocator;
 
-    // Test that it returns a valid date format
-    const date = try getDateDaysAgo(allocator, 7);
+    const date = try getDateDaysAgo(allocator, 7, std.testing.io);
     defer allocator.free(date);
 
     // Should be exactly 10 characters in YYYY-MM-DD format
@@ -227,10 +226,10 @@ test "getDateDaysAgo returns date N days ago" {
 test "getDateDaysAgo with 0 days returns today" {
     const allocator = std.testing.allocator;
 
-    const today = try getCurrentDate(allocator);
+    const today = try getCurrentDate(allocator, std.testing.io);
     defer allocator.free(today);
 
-    const zero_days_ago = try getDateDaysAgo(allocator, 0);
+    const zero_days_ago = try getDateDaysAgo(allocator, 0, std.testing.io);
     defer allocator.free(zero_days_ago);
 
     try std.testing.expectEqualStrings(today, zero_days_ago);

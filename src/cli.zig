@@ -489,12 +489,12 @@ test "invalid limit value returns error" {
 }
 
 test "printUsage writes help text" {
-    var buffer: std.ArrayList(u8) = .{};
-    defer buffer.deinit(std.testing.allocator);
+    var buf: [4096]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
 
-    try printUsage(buffer.writer(std.testing.allocator));
+    try printUsage(&w);
 
-    const output = buffer.items;
+    const output = w.buffered();
     try std.testing.expect(std.mem.indexOf(u8, output, "git-prs") != null);
     try std.testing.expect(std.mem.indexOf(u8, output, "mine") != null);
     try std.testing.expect(std.mem.indexOf(u8, output, "team") != null);
