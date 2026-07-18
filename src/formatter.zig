@@ -14,12 +14,9 @@ const MIN_AUTHOR_WIDTH: usize = 6;
 const ANSI_DIM_ITALIC = "\x1b[2;3m";
 const ANSI_RESET = "\x1b[0m";
 
-/// Check if stdout is a TTY (terminal)
-pub fn isStdoutTty() bool {
+pub fn isStdoutTty(io: std.Io) bool {
     const stdout = std.Io.File.stdout();
-    var t: std.posix.termios = undefined;
-    const result = std.posix.system.ioctl(stdout.handle, std.posix.T.CGETS, @intFromPtr(&t));
-    return @as(isize, @bitCast(result)) >= 0;
+    return stdout.isTty(io) catch false;
 }
 
 /// Check if URL fits inline with at least MIN_TITLE_WIDTH for the title.
@@ -37,7 +34,8 @@ fn urlFitsInline(terminal_width: u32, fixed_columns: usize, url_len: usize) ?usi
 }
 
 /// Get terminal width using ioctl, falling back to 80
-pub fn getTerminalWidth() u32 {
+pub fn getTerminalWidth(io: std.Io) u32 {
+    _ = io;
     const stdout = std.Io.File.stdout();
     var winsize: std.posix.winsize = undefined;
     const result = std.posix.system.ioctl(stdout.handle, std.posix.T.IOCGWINSZ, @intFromPtr(&winsize));
@@ -295,7 +293,6 @@ pub fn formatMineOutput(
     current_time: i64,
     io: std.Io,
 ) !void {
-    _ = io;
     if (prs.len == 0) {
         try writer.print("No open PRs found\n", .{});
         return;
@@ -309,7 +306,7 @@ pub fn formatMineOutput(
     // Calculate identifier width dynamically based on content
     const identifier_width = calcMaxIdentifierWidth(sorted_prs);
 
-    const terminal_width = getTerminalWidth();
+    const terminal_width = getTerminalWidth(io);
     // Fixed columns for mine view: identifier_width + 2 + AGE(5) + 2 + 👤(3) + 2 + LAST(5) + 2 = identifier_width + 21
     const fixed_columns = identifier_width + 21;
 
@@ -354,7 +351,7 @@ pub fn formatMineOutput(
     try writer.print("\n", .{});
 
     // Detect TTY for ANSI styling
-    const is_tty = isStdoutTty();
+    const is_tty = isStdoutTty(io);
 
     // Print rows - all use the same format (inline or two-line)
     for (sorted_prs) |pr| {
@@ -370,7 +367,6 @@ pub fn formatTeamOutput(
     current_time: i64,
     io: std.Io,
 ) !void {
-    _ = io;
     if (prs.len == 0) {
         try writer.print("No open PRs found\n", .{});
         return;
@@ -387,7 +383,7 @@ pub fn formatTeamOutput(
     // Calculate max author width based on content
     const max_author_width = calcMaxAuthorWidth(sorted_prs);
 
-    const terminal_width = getTerminalWidth();
+    const terminal_width = getTerminalWidth(io);
 
     // Calculate author width with truncation priority
     // Required fixed space: identifier_width + spacing(2) + AGE(5) + spacing(2) + 👤(3) + spacing(2) + LAST(5) + spacing(2) = identifier_width + 21
@@ -450,7 +446,7 @@ pub fn formatTeamOutput(
     try writer.print("\n", .{});
 
     // Detect TTY for ANSI styling
-    const is_tty = isStdoutTty();
+    const is_tty = isStdoutTty(io);
 
     // Print rows - all use the same format (inline or two-line)
     for (sorted_prs) |pr| {
@@ -578,7 +574,7 @@ test "truncate function - very short max_len" {
 test "getTerminalWidth - returns valid width" {
     // When running in a terminal, ioctl should return actual width
     // When running in CI/piped, should fall back to COLUMNS or 80
-    const width = getTerminalWidth();
+    const width = getTerminalWidth(std.testing.io);
     // Width must be at least 80 (default fallback) and reasonable upper bound
     try std.testing.expect(width >= 80);
     try std.testing.expect(width <= 10000); // Sanity check for reasonable width
@@ -589,7 +585,7 @@ test "getTerminalWidth - ioctl detects terminal width" {
     var winsize: std.posix.winsize = undefined;
     const result = std.posix.system.ioctl(stdout.handle, std.posix.T.IOCGWINSZ, @intFromPtr(&winsize));
     if (result == 0 and winsize.col > 0) {
-        const width = getTerminalWidth();
+        const width = getTerminalWidth(std.testing.io);
         try std.testing.expectEqual(winsize.col, @as(u16, @intCast(width)));
     }
 }
@@ -1522,8 +1518,7 @@ test "formatMergedUrlOutput - respects days parameter in message" {
 test "isStdoutTty - returns boolean" {
     // This test verifies that isStdoutTty() returns a boolean value
     // The actual value depends on execution context (terminal vs piped)
-    const is_tty = isStdoutTty();
-    // Just verify it's a boolean (true or false)
+    const is_tty = isStdoutTty(std.testing.io);
     _ = is_tty;
 }
 
