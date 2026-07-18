@@ -16,8 +16,10 @@ const ANSI_RESET = "\x1b[0m";
 
 /// Check if stdout is a TTY (terminal)
 pub fn isStdoutTty() bool {
-    const stdout = std.fs.File.stdout();
-    return std.posix.isatty(stdout.handle);
+    const stdout = std.Io.File.stdout();
+    var t: std.posix.termios = undefined;
+    const result = std.posix.system.ioctl(stdout.handle, std.posix.T.CGETS, @intFromPtr(&t));
+    return @as(isize, @bitCast(result)) >= 0;
 }
 
 /// Check if URL fits inline with at least MIN_TITLE_WIDTH for the title.
@@ -34,19 +36,16 @@ fn urlFitsInline(terminal_width: u32, fixed_columns: usize, url_len: usize) ?usi
     return null;
 }
 
-/// Get terminal width using ioctl, falling back to COLUMNS env var, then 80
+/// Get terminal width using ioctl, falling back to 80
 pub fn getTerminalWidth() u32 {
-    // Try ioctl-based detection first
-    const stdout = std.fs.File.stdout();
+    const stdout = std.Io.File.stdout();
     var winsize: std.posix.winsize = undefined;
     const result = std.posix.system.ioctl(stdout.handle, std.posix.T.IOCGWINSZ, @intFromPtr(&winsize));
     if (result == 0 and winsize.col > 0) {
         return winsize.col;
     }
 
-    // Fall back to COLUMNS env var
-    const columns = std.posix.getenv("COLUMNS") orelse return 80;
-    return std.fmt.parseInt(u32, columns, 10) catch 80;
+    return 80;
 }
 
 /// Calculate the maximum title width needed for a list of PRs
@@ -294,7 +293,9 @@ pub fn formatMineOutput(
     writer: anytype,
     prs: []const PullRequest,
     current_time: i64,
+    io: std.Io,
 ) !void {
+    _ = io;
     if (prs.len == 0) {
         try writer.print("No open PRs found\n", .{});
         return;
@@ -367,7 +368,9 @@ pub fn formatTeamOutput(
     writer: anytype,
     prs: []const PullRequest,
     current_time: i64,
+    io: std.Io,
 ) !void {
+    _ = io;
     if (prs.len == 0) {
         try writer.print("No open PRs found\n", .{});
         return;
@@ -582,33 +585,13 @@ test "getTerminalWidth - returns valid width" {
 }
 
 test "getTerminalWidth - ioctl detects terminal width" {
-    // This test verifies ioctl mechanism works when running in a real terminal
-    // The ioctl call queries stdout, so result depends on execution context
-    const stdout = std.fs.File.stdout();
+    const stdout = std.Io.File.stdout();
     var winsize: std.posix.winsize = undefined;
     const result = std.posix.system.ioctl(stdout.handle, std.posix.T.IOCGWINSZ, @intFromPtr(&winsize));
-    // If ioctl succeeds (we're in a terminal), width should match
     if (result == 0 and winsize.col > 0) {
         const width = getTerminalWidth();
         try std.testing.expectEqual(winsize.col, @as(u16, @intCast(width)));
     }
-    // If not in terminal, test passes (fallback behavior tested separately)
-}
-
-test "getTerminalWidth - COLUMNS fallback behavior" {
-    // Test that COLUMNS env var fallback parsing works correctly
-    // Note: This test validates the fallback code path by checking the parse logic
-    // The actual env var lookup is tested indirectly via getTerminalWidth()
-
-    // Valid COLUMNS values should parse correctly
-    try std.testing.expectEqual(@as(u32, 120), std.fmt.parseInt(u32, "120", 10) catch 80);
-    try std.testing.expectEqual(@as(u32, 200), std.fmt.parseInt(u32, "200", 10) catch 80);
-    try std.testing.expectEqual(@as(u32, 80), std.fmt.parseInt(u32, "80", 10) catch 80);
-
-    // Invalid COLUMNS values should fall back to 80
-    try std.testing.expectEqual(@as(u32, 80), std.fmt.parseInt(u32, "invalid", 10) catch 80);
-    try std.testing.expectEqual(@as(u32, 80), std.fmt.parseInt(u32, "", 10) catch 80);
-    try std.testing.expectEqual(@as(u32, 80), std.fmt.parseInt(u32, "-1", 10) catch 80);
 }
 
 test "sortByAge - sorts newest first" {
@@ -868,28 +851,28 @@ test "calcMaxAuthorWidth - minimum width" {
 }
 
 test "formatMineOutput - empty list" {
-    var buffer: std.ArrayListUnmanaged(u8) = .empty;
-    defer buffer.deinit(std.testing.allocator);
+    var buf: [65536]u8 = undefined;
+    var buffer = std.Io.Writer.fixed(&buf);
 
     const prs: []const PullRequest = &[_]PullRequest{};
-    try formatMineOutput(std.testing.allocator, buffer.writer(std.testing.allocator), prs, 0);
+    try formatMineOutput(std.testing.allocator, &buffer, prs, 0, std.testing.io);
 
-    try std.testing.expectEqualStrings("No open PRs found\n", buffer.items);
+    try std.testing.expectEqualStrings("No open PRs found\n", buffer.buffered());
 }
 
 test "formatTeamOutput - empty list" {
-    var buffer: std.ArrayListUnmanaged(u8) = .empty;
-    defer buffer.deinit(std.testing.allocator);
+    var buf: [65536]u8 = undefined;
+    var buffer = std.Io.Writer.fixed(&buf);
 
     const prs: []const PullRequest = &[_]PullRequest{};
-    try formatTeamOutput(std.testing.allocator, buffer.writer(std.testing.allocator), prs, 0);
+    try formatTeamOutput(std.testing.allocator, &buffer, prs, 0, std.testing.io);
 
-    try std.testing.expectEqualStrings("No open PRs found\n", buffer.items);
+    try std.testing.expectEqualStrings("No open PRs found\n", buffer.buffered());
 }
 
 test "formatMineOutput - single PR" {
-    var buffer: std.ArrayListUnmanaged(u8) = .empty;
-    defer buffer.deinit(std.testing.allocator);
+    var buf: [65536]u8 = undefined;
+    var buffer = std.Io.Writer.fixed(&buf);
 
     const prs = [_]PullRequest{
         .{
@@ -906,19 +889,19 @@ test "formatMineOutput - single PR" {
         },
     };
 
-    try formatMineOutput(std.testing.allocator, buffer.writer(std.testing.allocator), &prs, 1000);
+    try formatMineOutput(std.testing.allocator, &buffer, &prs, 1000, std.testing.io);
 
     // Check that output contains expected elements
-    try std.testing.expect(std.mem.indexOf(u8, buffer.items, "k8s/kube#1234") != null);
-    try std.testing.expect(std.mem.indexOf(u8, buffer.items, "Fix node scheduling bug") != null);
-    try std.testing.expect(std.mem.indexOf(u8, buffer.items, "ORG/REPO#NUM") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buffer.buffered(), "k8s/kube#1234") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buffer.buffered(), "Fix node scheduling bug") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buffer.buffered(), "ORG/REPO#NUM") != null);
     // Check that URL appears on second line with 4-space indent
-    try std.testing.expect(std.mem.indexOf(u8, buffer.items, "    https://github.com/k8s/kube/pull/1234") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buffer.buffered(), "    https://github.com/k8s/kube/pull/1234") != null);
 }
 
 test "formatTeamOutput - single PR" {
-    var buffer: std.ArrayListUnmanaged(u8) = .empty;
-    defer buffer.deinit(std.testing.allocator);
+    var buf: [65536]u8 = undefined;
+    var buffer = std.Io.Writer.fixed(&buf);
 
     const prs = [_]PullRequest{
         .{
@@ -935,20 +918,20 @@ test "formatTeamOutput - single PR" {
         },
     };
 
-    try formatTeamOutput(std.testing.allocator, buffer.writer(std.testing.allocator), &prs, 1000);
+    try formatTeamOutput(std.testing.allocator, &buffer, &prs, 1000, std.testing.io);
 
     // Check that output contains expected elements
-    try std.testing.expect(std.mem.indexOf(u8, buffer.items, "alice") != null);
-    try std.testing.expect(std.mem.indexOf(u8, buffer.items, "k8s/kube#1234") != null);
-    try std.testing.expect(std.mem.indexOf(u8, buffer.items, "Fix node scheduling bug") != null);
-    try std.testing.expect(std.mem.indexOf(u8, buffer.items, "AUTHOR") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buffer.buffered(), "alice") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buffer.buffered(), "k8s/kube#1234") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buffer.buffered(), "Fix node scheduling bug") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buffer.buffered(), "AUTHOR") != null);
     // Check that URL appears on second line with 4-space indent
-    try std.testing.expect(std.mem.indexOf(u8, buffer.items, "    https://github.com/k8s/kube/pull/1234") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buffer.buffered(), "    https://github.com/k8s/kube/pull/1234") != null);
 }
 
 test "formatMineOutput - long identifiers not truncated" {
-    var buffer: std.ArrayListUnmanaged(u8) = .empty;
-    defer buffer.deinit(std.testing.allocator);
+    var buf: [65536]u8 = undefined;
+    var buffer = std.Io.Writer.fixed(&buf);
 
     const prs = [_]PullRequest{
         .{
@@ -965,15 +948,15 @@ test "formatMineOutput - long identifiers not truncated" {
         },
     };
 
-    try formatMineOutput(std.testing.allocator, buffer.writer(std.testing.allocator), &prs, 1000);
+    try formatMineOutput(std.testing.allocator, &buffer, &prs, 1000, std.testing.io);
 
     // Check that full identifier is present (not truncated)
-    try std.testing.expect(std.mem.indexOf(u8, buffer.items, "very-long-organization/very-long-repository#12345") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buffer.buffered(), "very-long-organization/very-long-repository#12345") != null);
 }
 
 test "formatJsonOutput - single PR" {
-    var buffer: std.ArrayListUnmanaged(u8) = .empty;
-    defer buffer.deinit(std.testing.allocator);
+    var buf: [65536]u8 = undefined;
+    var buffer = std.Io.Writer.fixed(&buf);
 
     const prs = [_]PullRequest{
         .{
@@ -990,31 +973,31 @@ test "formatJsonOutput - single PR" {
         },
     };
 
-    try formatJsonOutput(buffer.writer(std.testing.allocator), &prs);
+    try formatJsonOutput(&buffer, &prs);
 
     // Check that output is valid JSON containing expected fields
-    try std.testing.expect(std.mem.indexOf(u8, buffer.items, "\"org\":\"k8s\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, buffer.items, "\"repo\":\"kube\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, buffer.items, "\"number\":1234") != null);
-    try std.testing.expect(std.mem.indexOf(u8, buffer.items, "\"title\":\"Fix node scheduling bug\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, buffer.items, "\"url\":\"https://github.com/k8s/kube/pull/1234\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, buffer.items, "\"author\":\"alice\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, buffer.items, "\"created_at\":1705322096") != null);
-    try std.testing.expect(std.mem.indexOf(u8, buffer.items, "\"last_comment_at\":1705400000") != null);
-    try std.testing.expect(std.mem.indexOf(u8, buffer.items, "\"unique_commenters\":4") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buffer.buffered(), "\"org\":\"k8s\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buffer.buffered(), "\"repo\":\"kube\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buffer.buffered(), "\"number\":1234") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buffer.buffered(), "\"title\":\"Fix node scheduling bug\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buffer.buffered(), "\"url\":\"https://github.com/k8s/kube/pull/1234\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buffer.buffered(), "\"author\":\"alice\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buffer.buffered(), "\"created_at\":1705322096") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buffer.buffered(), "\"last_comment_at\":1705400000") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buffer.buffered(), "\"unique_commenters\":4") != null);
     // Should be an array
-    try std.testing.expect(buffer.items[0] == '[');
+    try std.testing.expect(buffer.buffered()[0] == '[');
 }
 
 test "formatJsonOutput - empty list" {
-    var buffer: std.ArrayListUnmanaged(u8) = .empty;
-    defer buffer.deinit(std.testing.allocator);
+    var buf: [65536]u8 = undefined;
+    var buffer = std.Io.Writer.fixed(&buf);
 
     const prs: []const PullRequest = &[_]PullRequest{};
-    try formatJsonOutput(buffer.writer(std.testing.allocator), prs);
+    try formatJsonOutput(&buffer, prs);
 
     // Should output empty array
-    try std.testing.expectEqualStrings("[]\n", buffer.items);
+    try std.testing.expectEqualStrings("[]\n", buffer.buffered());
 }
 
 // Tests for inline URL functionality
@@ -1045,8 +1028,8 @@ test "urlFitsInline - returns null at one below threshold" {
 }
 
 test "formatMineRow - inline URL display" {
-    var buffer: std.ArrayListUnmanaged(u8) = .empty;
-    defer buffer.deinit(std.testing.allocator);
+    var buf: [65536]u8 = undefined;
+    var buffer = std.Io.Writer.fixed(&buf);
 
     const pr = PullRequest{
         .org = "k8s",
@@ -1061,23 +1044,23 @@ test "formatMineRow - inline URL display" {
         .is_draft = false,
     };
 
-    try formatMineRow(buffer.writer(std.testing.allocator), pr, 1000, 30, 15, true, false);
+    try formatMineRow(&buffer, pr, 1000, 30, 15, true, false);
 
     // URL should be on the same line (inline), not on a separate line
     // Check there's only one newline (single line output)
     var newline_count: usize = 0;
-    for (buffer.items) |c| {
+    for (buffer.buffered()) |c| {
         if (c == '\n') newline_count += 1;
     }
     try std.testing.expectEqual(@as(usize, 1), newline_count);
 
     // URL should appear after the LAST column with 2-space separator
-    try std.testing.expect(std.mem.indexOf(u8, buffer.items, "  https://github.com/k8s/kube/pull/1234") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buffer.buffered(), "  https://github.com/k8s/kube/pull/1234") != null);
 }
 
 test "formatMineRow - two-line URL display" {
-    var buffer: std.ArrayListUnmanaged(u8) = .empty;
-    defer buffer.deinit(std.testing.allocator);
+    var buf: [65536]u8 = undefined;
+    var buffer = std.Io.Writer.fixed(&buf);
 
     const pr = PullRequest{
         .org = "k8s",
@@ -1092,23 +1075,23 @@ test "formatMineRow - two-line URL display" {
         .is_draft = false,
     };
 
-    try formatMineRow(buffer.writer(std.testing.allocator), pr, 1000, 30, 15, false, false);
+    try formatMineRow(&buffer, pr, 1000, 30, 15, false, false);
 
     // URL should be on a separate line with 4-space indent
     // Check there are two newlines (two line output)
     var newline_count: usize = 0;
-    for (buffer.items) |c| {
+    for (buffer.buffered()) |c| {
         if (c == '\n') newline_count += 1;
     }
     try std.testing.expectEqual(@as(usize, 2), newline_count);
 
     // URL should appear with 4-space indent
-    try std.testing.expect(std.mem.indexOf(u8, buffer.items, "    https://github.com/k8s/kube/pull/1234") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buffer.buffered(), "    https://github.com/k8s/kube/pull/1234") != null);
 }
 
 test "formatTeamRow - inline URL display" {
-    var buffer: std.ArrayListUnmanaged(u8) = .empty;
-    defer buffer.deinit(std.testing.allocator);
+    var buf: [65536]u8 = undefined;
+    var buffer = std.Io.Writer.fixed(&buf);
 
     const pr = PullRequest{
         .org = "k8s",
@@ -1123,22 +1106,22 @@ test "formatTeamRow - inline URL display" {
         .is_draft = false,
     };
 
-    try formatTeamRow(buffer.writer(std.testing.allocator), pr, 1000, 30, 15, 8, true, false);
+    try formatTeamRow(&buffer, pr, 1000, 30, 15, 8, true, false);
 
     // URL should be on the same line (inline)
     var newline_count: usize = 0;
-    for (buffer.items) |c| {
+    for (buffer.buffered()) |c| {
         if (c == '\n') newline_count += 1;
     }
     try std.testing.expectEqual(@as(usize, 1), newline_count);
 
     // URL should appear after the LAST column with 2-space separator
-    try std.testing.expect(std.mem.indexOf(u8, buffer.items, "  https://github.com/k8s/kube/pull/1234") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buffer.buffered(), "  https://github.com/k8s/kube/pull/1234") != null);
 }
 
 test "formatTeamRow - two-line URL display" {
-    var buffer: std.ArrayListUnmanaged(u8) = .empty;
-    defer buffer.deinit(std.testing.allocator);
+    var buf: [65536]u8 = undefined;
+    var buffer = std.Io.Writer.fixed(&buf);
 
     const pr = PullRequest{
         .org = "k8s",
@@ -1153,17 +1136,17 @@ test "formatTeamRow - two-line URL display" {
         .is_draft = false,
     };
 
-    try formatTeamRow(buffer.writer(std.testing.allocator), pr, 1000, 30, 15, 8, false, false);
+    try formatTeamRow(&buffer, pr, 1000, 30, 15, 8, false, false);
 
     // URL should be on a separate line
     var newline_count: usize = 0;
-    for (buffer.items) |c| {
+    for (buffer.buffered()) |c| {
         if (c == '\n') newline_count += 1;
     }
     try std.testing.expectEqual(@as(usize, 2), newline_count);
 
     // URL should appear with 4-space indent
-    try std.testing.expect(std.mem.indexOf(u8, buffer.items, "    https://github.com/k8s/kube/pull/1234") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buffer.buffered(), "    https://github.com/k8s/kube/pull/1234") != null);
 }
 
 test "urlFitsInline - very long URL forces two-line format" {
@@ -1203,8 +1186,8 @@ test "urlFitsInline - terminal width less than fixed columns returns null" {
 }
 
 test "formatMineRow - URL never truncated in inline mode" {
-    var buffer: std.ArrayListUnmanaged(u8) = .empty;
-    defer buffer.deinit(std.testing.allocator);
+    var buf: [65536]u8 = undefined;
+    var buffer = std.Io.Writer.fixed(&buf);
 
     const long_url = "https://github.com/very-long-organization-name/very-long-repository-name/pull/12345";
     const pr = PullRequest{
@@ -1220,15 +1203,15 @@ test "formatMineRow - URL never truncated in inline mode" {
         .is_draft = false,
     };
 
-    try formatMineRow(buffer.writer(std.testing.allocator), pr, 1000, 20, 12, true, false);
+    try formatMineRow(&buffer, pr, 1000, 20, 12, true, false);
 
     // Full URL should appear without truncation
-    try std.testing.expect(std.mem.indexOf(u8, buffer.items, long_url) != null);
+    try std.testing.expect(std.mem.indexOf(u8, buffer.buffered(), long_url) != null);
 }
 
 test "formatMineRow - URL never truncated in two-line mode" {
-    var buffer: std.ArrayListUnmanaged(u8) = .empty;
-    defer buffer.deinit(std.testing.allocator);
+    var buf: [65536]u8 = undefined;
+    var buffer = std.Io.Writer.fixed(&buf);
 
     const long_url = "https://github.com/very-long-organization-name/very-long-repository-name/pull/12345";
     const pr = PullRequest{
@@ -1244,10 +1227,10 @@ test "formatMineRow - URL never truncated in two-line mode" {
         .is_draft = false,
     };
 
-    try formatMineRow(buffer.writer(std.testing.allocator), pr, 1000, 20, 12, false, false);
+    try formatMineRow(&buffer, pr, 1000, 20, 12, false, false);
 
     // Full URL should appear without truncation
-    try std.testing.expect(std.mem.indexOf(u8, buffer.items, long_url) != null);
+    try std.testing.expect(std.mem.indexOf(u8, buffer.buffered(), long_url) != null);
 }
 
 // Tests for header URL column in inline mode
@@ -1256,8 +1239,8 @@ test "formatMineOutput - header includes URL column in inline mode" {
     // Use a mock that forces inline mode by setting a very wide terminal
     // We'll test this by checking the output contains "URL" in the header
     // Since we can't control terminal width directly, we verify header format logic
-    var buffer: std.ArrayListUnmanaged(u8) = .empty;
-    defer buffer.deinit(std.testing.allocator);
+    var buf: [65536]u8 = undefined;
+    var buffer = std.Io.Writer.fixed(&buf);
 
     // Create PRs with short URLs that would fit inline on a wide terminal
     const prs = [_]PullRequest{
@@ -1275,20 +1258,20 @@ test "formatMineOutput - header includes URL column in inline mode" {
         },
     };
 
-    try formatMineOutput(std.testing.allocator, buffer.writer(std.testing.allocator), &prs, 1000);
+    try formatMineOutput(std.testing.allocator, &buffer, &prs, 1000, std.testing.io);
 
     // Header should contain expected columns
-    try std.testing.expect(std.mem.indexOf(u8, buffer.items, "ORG/REPO#NUM") != null);
-    try std.testing.expect(std.mem.indexOf(u8, buffer.items, "TITLE") != null);
-    try std.testing.expect(std.mem.indexOf(u8, buffer.items, "AGE") != null);
-    try std.testing.expect(std.mem.indexOf(u8, buffer.items, "LAST") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buffer.buffered(), "ORG/REPO#NUM") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buffer.buffered(), "TITLE") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buffer.buffered(), "AGE") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buffer.buffered(), "LAST") != null);
     // URL header appears only in inline mode - depends on terminal width
     // If inline mode is active, URL should be in header; otherwise URL is on second line
 }
 
 test "formatTeamOutput - header includes URL column in inline mode" {
-    var buffer: std.ArrayListUnmanaged(u8) = .empty;
-    defer buffer.deinit(std.testing.allocator);
+    var buf: [65536]u8 = undefined;
+    var buffer = std.Io.Writer.fixed(&buf);
 
     const prs = [_]PullRequest{
         .{
@@ -1305,14 +1288,14 @@ test "formatTeamOutput - header includes URL column in inline mode" {
         },
     };
 
-    try formatTeamOutput(std.testing.allocator, buffer.writer(std.testing.allocator), &prs, 1000);
+    try formatTeamOutput(std.testing.allocator, &buffer, &prs, 1000, std.testing.io);
 
     // Header should contain expected columns
-    try std.testing.expect(std.mem.indexOf(u8, buffer.items, "AUTHOR") != null);
-    try std.testing.expect(std.mem.indexOf(u8, buffer.items, "ORG/REPO#NUM") != null);
-    try std.testing.expect(std.mem.indexOf(u8, buffer.items, "TITLE") != null);
-    try std.testing.expect(std.mem.indexOf(u8, buffer.items, "AGE") != null);
-    try std.testing.expect(std.mem.indexOf(u8, buffer.items, "LAST") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buffer.buffered(), "AUTHOR") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buffer.buffered(), "ORG/REPO#NUM") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buffer.buffered(), "TITLE") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buffer.buffered(), "AGE") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buffer.buffered(), "LAST") != null);
 }
 
 // Tests for calcMaxTitleWidth and adaptive title width
@@ -1378,8 +1361,8 @@ test "calcMaxTitleWidth - empty list returns minimum" {
 }
 
 test "formatTeamRow - full author display when space available" {
-    var buffer: std.ArrayListUnmanaged(u8) = .empty;
-    defer buffer.deinit(std.testing.allocator);
+    var buf: [65536]u8 = undefined;
+    var buffer = std.Io.Writer.fixed(&buf);
 
     const pr = PullRequest{
         .org = "k8s",
@@ -1395,15 +1378,15 @@ test "formatTeamRow - full author display when space available" {
     };
 
     // Provide enough author_width to display full username
-    try formatTeamRow(buffer.writer(std.testing.allocator), pr, 1000, 30, 15, 18, false, false);
+    try formatTeamRow(&buffer, pr, 1000, 30, 15, 18, false, false);
 
     // Full author should be displayed without truncation
-    try std.testing.expect(std.mem.indexOf(u8, buffer.items, "very-long-username") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buffer.buffered(), "very-long-username") != null);
 }
 
 test "formatTeamRow - author truncation when constrained" {
-    var buffer: std.ArrayListUnmanaged(u8) = .empty;
-    defer buffer.deinit(std.testing.allocator);
+    var buf: [65536]u8 = undefined;
+    var buffer = std.Io.Writer.fixed(&buf);
 
     const pr = PullRequest{
         .org = "k8s",
@@ -1419,17 +1402,17 @@ test "formatTeamRow - author truncation when constrained" {
     };
 
     // Constrain author_width to 10 chars
-    try formatTeamRow(buffer.writer(std.testing.allocator), pr, 1000, 30, 15, 10, false, false);
+    try formatTeamRow(&buffer, pr, 1000, 30, 15, 10, false, false);
 
     // Author should be truncated with "..."
-    try std.testing.expect(std.mem.indexOf(u8, buffer.items, "very-lo...") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buffer.buffered(), "very-lo...") != null);
     // Full username should NOT be present
-    try std.testing.expect(std.mem.indexOf(u8, buffer.items, "very-long-username") == null);
+    try std.testing.expect(std.mem.indexOf(u8, buffer.buffered(), "very-long-username") == null);
 }
 
 test "formatTeamRow - minimum author width preserved" {
-    var buffer: std.ArrayListUnmanaged(u8) = .empty;
-    defer buffer.deinit(std.testing.allocator);
+    var buf: [65536]u8 = undefined;
+    var buffer = std.Io.Writer.fixed(&buf);
 
     const pr = PullRequest{
         .org = "k8s",
@@ -1445,25 +1428,25 @@ test "formatTeamRow - minimum author width preserved" {
     };
 
     // Use minimum author_width of 6
-    try formatTeamRow(buffer.writer(std.testing.allocator), pr, 1000, 30, 15, 6, false, false);
+    try formatTeamRow(&buffer, pr, 1000, 30, 15, 6, false, false);
 
     // Author should be truncated to 6 chars: "ver..."
-    try std.testing.expect(std.mem.indexOf(u8, buffer.items, "ver...") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buffer.buffered(), "ver...") != null);
 }
 
 test "formatMergedUrlOutput - empty list shows message" {
-    var buffer: std.ArrayListUnmanaged(u8) = .empty;
-    defer buffer.deinit(std.testing.allocator);
+    var buf: [65536]u8 = undefined;
+    var buffer = std.Io.Writer.fixed(&buf);
 
     const prs: []const PullRequest = &[_]PullRequest{};
-    try formatMergedUrlOutput(buffer.writer(std.testing.allocator), prs, 7);
+    try formatMergedUrlOutput(&buffer, prs, 7);
 
-    try std.testing.expectEqualStrings("No PRs merged in the last 7 days\n", buffer.items);
+    try std.testing.expectEqualStrings("No PRs merged in the last 7 days\n", buffer.buffered());
 }
 
 test "formatMergedUrlOutput - single PR outputs URL only" {
-    var buffer: std.ArrayListUnmanaged(u8) = .empty;
-    defer buffer.deinit(std.testing.allocator);
+    var buf: [65536]u8 = undefined;
+    var buffer = std.Io.Writer.fixed(&buf);
 
     const prs = [_]PullRequest{
         .{
@@ -1480,14 +1463,14 @@ test "formatMergedUrlOutput - single PR outputs URL only" {
         },
     };
 
-    try formatMergedUrlOutput(buffer.writer(std.testing.allocator), &prs, 7);
+    try formatMergedUrlOutput(&buffer, &prs, 7);
 
-    try std.testing.expectEqualStrings("https://github.com/k8s/kube/pull/1234\n", buffer.items);
+    try std.testing.expectEqualStrings("https://github.com/k8s/kube/pull/1234\n", buffer.buffered());
 }
 
 test "formatMergedUrlOutput - multiple PRs output URLs on separate lines" {
-    var buffer: std.ArrayListUnmanaged(u8) = .empty;
-    defer buffer.deinit(std.testing.allocator);
+    var buf: [65536]u8 = undefined;
+    var buffer = std.Io.Writer.fixed(&buf);
 
     const prs = [_]PullRequest{
         .{
@@ -1516,24 +1499,24 @@ test "formatMergedUrlOutput - multiple PRs output URLs on separate lines" {
         },
     };
 
-    try formatMergedUrlOutput(buffer.writer(std.testing.allocator), &prs, 7);
+    try formatMergedUrlOutput(&buffer, &prs, 7);
 
     const expected =
         \\https://github.com/k8s/kube/pull/1234
         \\https://github.com/k8s/kube/pull/5678
         \\
     ;
-    try std.testing.expectEqualStrings(expected, buffer.items);
+    try std.testing.expectEqualStrings(expected, buffer.buffered());
 }
 
 test "formatMergedUrlOutput - respects days parameter in message" {
-    var buffer: std.ArrayListUnmanaged(u8) = .empty;
-    defer buffer.deinit(std.testing.allocator);
+    var buf: [65536]u8 = undefined;
+    var buffer = std.Io.Writer.fixed(&buf);
 
     const prs: []const PullRequest = &[_]PullRequest{};
-    try formatMergedUrlOutput(buffer.writer(std.testing.allocator), prs, 14);
+    try formatMergedUrlOutput(&buffer, prs, 14);
 
-    try std.testing.expectEqualStrings("No PRs merged in the last 14 days\n", buffer.items);
+    try std.testing.expectEqualStrings("No PRs merged in the last 14 days\n", buffer.buffered());
 }
 
 test "isStdoutTty - returns boolean" {
@@ -1545,8 +1528,8 @@ test "isStdoutTty - returns boolean" {
 }
 
 test "formatMineRow - draft PR with TTY includes ANSI codes" {
-    var buffer: std.ArrayListUnmanaged(u8) = .empty;
-    defer buffer.deinit(std.testing.allocator);
+    var buf: [65536]u8 = undefined;
+    var buffer = std.Io.Writer.fixed(&buf);
 
     const pr = PullRequest{
         .org = "k8s",
@@ -1561,16 +1544,16 @@ test "formatMineRow - draft PR with TTY includes ANSI codes" {
         .is_draft = true,
     };
 
-    try formatMineRow(buffer.writer(std.testing.allocator), pr, 1000, 30, 15, false, true);
+    try formatMineRow(&buffer, pr, 1000, 30, 15, false, true);
 
     // Should contain ANSI codes for dim+italic
-    try std.testing.expect(std.mem.indexOf(u8, buffer.items, ANSI_DIM_ITALIC) != null);
-    try std.testing.expect(std.mem.indexOf(u8, buffer.items, ANSI_RESET) != null);
+    try std.testing.expect(std.mem.indexOf(u8, buffer.buffered(), ANSI_DIM_ITALIC) != null);
+    try std.testing.expect(std.mem.indexOf(u8, buffer.buffered(), ANSI_RESET) != null);
 }
 
 test "formatMineRow - draft PR without TTY has no ANSI codes" {
-    var buffer: std.ArrayListUnmanaged(u8) = .empty;
-    defer buffer.deinit(std.testing.allocator);
+    var buf: [65536]u8 = undefined;
+    var buffer = std.Io.Writer.fixed(&buf);
 
     const pr = PullRequest{
         .org = "k8s",
@@ -1585,16 +1568,16 @@ test "formatMineRow - draft PR without TTY has no ANSI codes" {
         .is_draft = true,
     };
 
-    try formatMineRow(buffer.writer(std.testing.allocator), pr, 1000, 30, 15, false, false);
+    try formatMineRow(&buffer, pr, 1000, 30, 15, false, false);
 
     // Should NOT contain ANSI codes when not TTY
-    try std.testing.expect(std.mem.indexOf(u8, buffer.items, ANSI_DIM_ITALIC) == null);
-    try std.testing.expect(std.mem.indexOf(u8, buffer.items, ANSI_RESET) == null);
+    try std.testing.expect(std.mem.indexOf(u8, buffer.buffered(), ANSI_DIM_ITALIC) == null);
+    try std.testing.expect(std.mem.indexOf(u8, buffer.buffered(), ANSI_RESET) == null);
 }
 
 test "formatTeamRow - draft PR with TTY includes ANSI codes" {
-    var buffer: std.ArrayListUnmanaged(u8) = .empty;
-    defer buffer.deinit(std.testing.allocator);
+    var buf: [65536]u8 = undefined;
+    var buffer = std.Io.Writer.fixed(&buf);
 
     const pr = PullRequest{
         .org = "k8s",
@@ -1609,16 +1592,16 @@ test "formatTeamRow - draft PR with TTY includes ANSI codes" {
         .is_draft = true,
     };
 
-    try formatTeamRow(buffer.writer(std.testing.allocator), pr, 1000, 30, 15, 8, false, true);
+    try formatTeamRow(&buffer, pr, 1000, 30, 15, 8, false, true);
 
     // Should contain ANSI codes for dim+italic
-    try std.testing.expect(std.mem.indexOf(u8, buffer.items, ANSI_DIM_ITALIC) != null);
-    try std.testing.expect(std.mem.indexOf(u8, buffer.items, ANSI_RESET) != null);
+    try std.testing.expect(std.mem.indexOf(u8, buffer.buffered(), ANSI_DIM_ITALIC) != null);
+    try std.testing.expect(std.mem.indexOf(u8, buffer.buffered(), ANSI_RESET) != null);
 }
 
 test "formatTeamRow - draft PR without TTY has no ANSI codes" {
-    var buffer: std.ArrayListUnmanaged(u8) = .empty;
-    defer buffer.deinit(std.testing.allocator);
+    var buf: [65536]u8 = undefined;
+    var buffer = std.Io.Writer.fixed(&buf);
 
     const pr = PullRequest{
         .org = "k8s",
@@ -1633,16 +1616,16 @@ test "formatTeamRow - draft PR without TTY has no ANSI codes" {
         .is_draft = true,
     };
 
-    try formatTeamRow(buffer.writer(std.testing.allocator), pr, 1000, 30, 15, 8, false, false);
+    try formatTeamRow(&buffer, pr, 1000, 30, 15, 8, false, false);
 
     // Should NOT contain ANSI codes when not TTY
-    try std.testing.expect(std.mem.indexOf(u8, buffer.items, ANSI_DIM_ITALIC) == null);
-    try std.testing.expect(std.mem.indexOf(u8, buffer.items, ANSI_RESET) == null);
+    try std.testing.expect(std.mem.indexOf(u8, buffer.buffered(), ANSI_DIM_ITALIC) == null);
+    try std.testing.expect(std.mem.indexOf(u8, buffer.buffered(), ANSI_RESET) == null);
 }
 
 test "formatJsonOutput - includes is_draft field" {
-    var buffer: std.ArrayListUnmanaged(u8) = .empty;
-    defer buffer.deinit(std.testing.allocator);
+    var buf: [65536]u8 = undefined;
+    var buffer = std.Io.Writer.fixed(&buf);
 
     const prs = [_]PullRequest{
         .{
@@ -1671,9 +1654,9 @@ test "formatJsonOutput - includes is_draft field" {
         },
     };
 
-    try formatJsonOutput(buffer.writer(std.testing.allocator), &prs);
+    try formatJsonOutput(&buffer, &prs);
 
     // Check that is_draft appears for both PRs with correct values
-    try std.testing.expect(std.mem.indexOf(u8, buffer.items, "\"is_draft\":true") != null);
-    try std.testing.expect(std.mem.indexOf(u8, buffer.items, "\"is_draft\":false") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buffer.buffered(), "\"is_draft\":true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buffer.buffered(), "\"is_draft\":false") != null);
 }

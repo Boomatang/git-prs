@@ -31,15 +31,17 @@ pub const GitHubError = error{
     RateLimitExceeded,
     ParseError,
     GhCommandFailed,
-} || std.mem.Allocator.Error || std.process.Child.SpawnError;
+} || std.mem.Allocator.Error || std.process.SpawnError;
 
 pub const Client = struct {
     allocator: std.mem.Allocator,
+    io: std.Io,
     auth_token: []const u8,
 
-    pub fn init(allocator: std.mem.Allocator, auth_token: []const u8) Client {
+    pub fn init(allocator: std.mem.Allocator, io: std.Io, auth_token: []const u8) Client {
         return .{
             .allocator = allocator,
+            .io = io,
             .auth_token = auth_token,
         };
     }
@@ -56,15 +58,17 @@ pub const Client = struct {
 
 /// Get the authenticated user's login name using `gh api`
 pub fn getAuthenticatedUser(client: *Client) GitHubError![]const u8 {
-    const result = std.process.Child.run(.{
-        .allocator = client.allocator,
+    const result = std.process.run(client.allocator, client.io, .{
         .argv = &.{ "gh", "api", "/user", "--jq", ".login" },
     }) catch return error.GhCommandFailed;
     defer client.allocator.free(result.stdout);
     defer client.allocator.free(result.stderr);
 
-    if (result.term.Exited != 0) {
-        return error.AuthError;
+    switch (result.term) {
+        .exited => |code| {
+            if (code != 0) return error.AuthError;
+        },
+        else => return error.AuthError,
     }
 
     const login = std.mem.trim(u8, result.stdout, &std.ascii.whitespace);
@@ -254,9 +258,7 @@ fn fetchPRsWithGh(
     const query_param = try std.fmt.allocPrint(client.allocator, "query={s}", .{graphql_query});
     defer client.allocator.free(query_param);
 
-    // Use gh api graphql to fetch PRs
-    const result = std.process.Child.run(.{
-        .allocator = client.allocator,
+    const result = std.process.run(client.allocator, client.io, .{
         .argv = &.{
             "gh", "api", "graphql",
             "-f", query_param,
@@ -265,8 +267,11 @@ fn fetchPRsWithGh(
     defer client.allocator.free(result.stdout);
     defer client.allocator.free(result.stderr);
 
-    if (result.term.Exited != 0) {
-        return error.GhCommandFailed;
+    switch (result.term) {
+        .exited => |code| {
+            if (code != 0) return error.GhCommandFailed;
+        },
+        else => return error.GhCommandFailed,
     }
 
     return try parseGraphQLResponse(client.allocator, result.stdout);
@@ -338,9 +343,7 @@ fn fetchMergedPRsWithGh(
     const query_param = try std.fmt.allocPrint(client.allocator, "query={s}", .{graphql_query});
     defer client.allocator.free(query_param);
 
-    // Use gh api graphql to fetch PRs
-    const result = std.process.Child.run(.{
-        .allocator = client.allocator,
+    const result = std.process.run(client.allocator, client.io, .{
         .argv = &.{
             "gh", "api", "graphql",
             "-f", query_param,
@@ -349,8 +352,11 @@ fn fetchMergedPRsWithGh(
     defer client.allocator.free(result.stdout);
     defer client.allocator.free(result.stderr);
 
-    if (result.term.Exited != 0) {
-        return error.GhCommandFailed;
+    switch (result.term) {
+        .exited => |code| {
+            if (code != 0) return error.GhCommandFailed;
+        },
+        else => return error.GhCommandFailed,
     }
 
     return try parseGraphQLResponse(client.allocator, result.stdout);
@@ -567,7 +573,7 @@ test "Client init and deinit" {
     const allocator = std.testing.allocator;
     const token = "test-token";
 
-    var client = Client.init(allocator, token);
+    var client = Client.init(allocator, std.testing.io, token);
     defer client.deinit();
 
     try std.testing.expectEqual(allocator, client.allocator);
