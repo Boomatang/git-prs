@@ -4,6 +4,7 @@ const zon = @import("build.zig.zon");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const dirty = b.option(bool, "dirty", "Skip release pre-flight checks (branch, clean tree, etc.)") orelse false;
     // Add clap dependency
     const clap = b.dependency("clap", .{});
     const name_str = @tagName(zon.name);
@@ -145,7 +146,7 @@ pub fn build(b: *std.Build) void {
     const release_step = b.step("release", "Create a GitHub release");
 
     // Pre-flight checks - single shell command that runs all checks in sequence
-    const preflight_cmd = b.addSystemCommand(&.{
+    const preflight_cmd = if (dirty) b.addSystemCommand(&.{ "true" }) else b.addSystemCommand(&.{
         "sh",
         "-c",
         b.fmt(
