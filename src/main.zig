@@ -131,7 +131,7 @@ fn runMineCommand(
         try formatter.formatJsonOutput(&w.interface, prs);
     } else {
         const current_time = std.Io.Timestamp.now(io, .real).toSeconds();
-        try formatter.formatMineOutput(allocator, &w.interface, prs, current_time, io);
+        try formatter.formatMineOutput(allocator, &w.interface, prs, current_time, io, environ_map);
     }
     try w.flush();
 }
@@ -239,7 +239,7 @@ fn runTeamCommand(
         try formatter.formatJsonOutput(&w.interface, all_prs.items);
     } else {
         const current_time = std.Io.Timestamp.now(io, .real).toSeconds();
-        try formatter.formatTeamOutput(allocator, &w.interface, all_prs.items, current_time, io);
+        try formatter.formatTeamOutput(allocator, &w.interface, all_prs.items, current_time, io, environ_map);
     }
     try w.flush();
 }

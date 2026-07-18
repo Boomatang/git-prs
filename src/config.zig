@@ -439,8 +439,34 @@ fn printNotAuthenticatedError(io: std.Io) void {
 // Tests
 
 test "getConfigPath with XDG_CONFIG_HOME set" {
-    const expected = "/custom/config/git-prs/config.json";
-    _ = expected;
+    const allocator = std.testing.allocator;
+    var env = std.process.Environ.Map.init(allocator);
+    defer env.deinit();
+    try env.put("XDG_CONFIG_HOME", "/custom/config");
+
+    const path = try getConfigPath(allocator, &env);
+    defer allocator.free(path);
+    try std.testing.expectEqualStrings("/custom/config/git-prs/config.json", path);
+}
+
+test "getConfigPath with HOME fallback" {
+    const allocator = std.testing.allocator;
+    var env = std.process.Environ.Map.init(allocator);
+    defer env.deinit();
+    try env.put("HOME", "/home/testuser");
+
+    const path = try getConfigPath(allocator, &env);
+    defer allocator.free(path);
+    try std.testing.expectEqualStrings("/home/testuser/.config/git-prs/config.json", path);
+}
+
+test "getConfigPath with no HOME or XDG_CONFIG_HOME" {
+    const allocator = std.testing.allocator;
+    var env = std.process.Environ.Map.init(allocator);
+    defer env.deinit();
+
+    const result = getConfigPath(allocator, &env);
+    try std.testing.expectError(error.EnvironmentVariableNotFound, result);
 }
 
 test "parseMineOrgs with valid data" {

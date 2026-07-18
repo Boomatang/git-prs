@@ -33,14 +33,20 @@ fn urlFitsInline(terminal_width: u32, fixed_columns: usize, url_len: usize) ?usi
     return null;
 }
 
-/// Get terminal width using ioctl, falling back to 80
-pub fn getTerminalWidth(io: std.Io) u32 {
+pub fn getTerminalWidth(io: std.Io, environ_map: *std.process.Environ.Map) u32 {
     _ = io;
     const stdout = std.Io.File.stdout();
     var winsize: std.posix.winsize = undefined;
+    // No stdlib API for terminal size in Zig 0.16.0; raw ioctl is what std.Progress uses too.
     const result = std.posix.system.ioctl(stdout.handle, std.posix.T.IOCGWINSZ, @intFromPtr(&winsize));
     if (result == 0 and winsize.col > 0) {
         return winsize.col;
+    }
+
+    if (environ_map.get("COLUMNS")) |columns_str| {
+        if (std.fmt.parseInt(u32, columns_str, 10)) |columns| {
+            if (columns > 0) return columns;
+        } else |_| {}
     }
 
     return 80;
@@ -292,6 +298,7 @@ pub fn formatMineOutput(
     prs: []const PullRequest,
     current_time: i64,
     io: std.Io,
+    environ_map: *std.process.Environ.Map,
 ) !void {
     if (prs.len == 0) {
         try writer.print("No open PRs found\n", .{});
@@ -306,7 +313,7 @@ pub fn formatMineOutput(
     // Calculate identifier width dynamically based on content
     const identifier_width = calcMaxIdentifierWidth(sorted_prs);
 
-    const terminal_width = getTerminalWidth(io);
+    const terminal_width = getTerminalWidth(io, environ_map);
     // Fixed columns for mine view: identifier_width + 2 + AGE(5) + 2 + 👤(3) + 2 + LAST(5) + 2 = identifier_width + 21
     const fixed_columns = identifier_width + 21;
 
@@ -366,6 +373,7 @@ pub fn formatTeamOutput(
     prs: []const PullRequest,
     current_time: i64,
     io: std.Io,
+    environ_map: *std.process.Environ.Map,
 ) !void {
     if (prs.len == 0) {
         try writer.print("No open PRs found\n", .{});
@@ -383,7 +391,7 @@ pub fn formatTeamOutput(
     // Calculate max author width based on content
     const max_author_width = calcMaxAuthorWidth(sorted_prs);
 
-    const terminal_width = getTerminalWidth(io);
+    const terminal_width = getTerminalWidth(io, environ_map);
 
     // Calculate author width with truncation priority
     // Required fixed space: identifier_width + spacing(2) + AGE(5) + spacing(2) + 👤(3) + spacing(2) + LAST(5) + spacing(2) = identifier_width + 21
@@ -572,21 +580,35 @@ test "truncate function - very short max_len" {
 }
 
 test "getTerminalWidth - returns valid width" {
-    // When running in a terminal, ioctl should return actual width
-    // When running in CI/piped, should fall back to COLUMNS or 80
-    const width = getTerminalWidth(std.testing.io);
-    // Width must be at least 80 (default fallback) and reasonable upper bound
+    var env = std.process.Environ.Map.init(std.testing.allocator);
+    defer env.deinit();
+    const width = getTerminalWidth(std.testing.io, &env);
     try std.testing.expect(width >= 80);
-    try std.testing.expect(width <= 10000); // Sanity check for reasonable width
+    try std.testing.expect(width <= 10000);
 }
 
 test "getTerminalWidth - ioctl detects terminal width" {
+    var env = std.process.Environ.Map.init(std.testing.allocator);
+    defer env.deinit();
     const stdout = std.Io.File.stdout();
     var winsize: std.posix.winsize = undefined;
     const result = std.posix.system.ioctl(stdout.handle, std.posix.T.IOCGWINSZ, @intFromPtr(&winsize));
     if (result == 0 and winsize.col > 0) {
-        const width = getTerminalWidth(std.testing.io);
+        const width = getTerminalWidth(std.testing.io, &env);
         try std.testing.expectEqual(winsize.col, @as(u16, @intCast(width)));
+    }
+}
+
+test "getTerminalWidth - COLUMNS fallback" {
+    var env = std.process.Environ.Map.init(std.testing.allocator);
+    defer env.deinit();
+    try env.put("COLUMNS", "120");
+    const stdout = std.Io.File.stdout();
+    var winsize: std.posix.winsize = undefined;
+    const result = std.posix.system.ioctl(stdout.handle, std.posix.T.IOCGWINSZ, @intFromPtr(&winsize));
+    if (result != 0 or winsize.col == 0) {
+        const width = getTerminalWidth(std.testing.io, &env);
+        try std.testing.expectEqual(@as(u32, 120), width);
     }
 }
 
@@ -849,9 +871,11 @@ test "calcMaxAuthorWidth - minimum width" {
 test "formatMineOutput - empty list" {
     var buf: [65536]u8 = undefined;
     var buffer = std.Io.Writer.fixed(&buf);
+    var env = std.process.Environ.Map.init(std.testing.allocator);
+    defer env.deinit();
 
     const prs: []const PullRequest = &[_]PullRequest{};
-    try formatMineOutput(std.testing.allocator, &buffer, prs, 0, std.testing.io);
+    try formatMineOutput(std.testing.allocator, &buffer, prs, 0, std.testing.io, &env);
 
     try std.testing.expectEqualStrings("No open PRs found\n", buffer.buffered());
 }
@@ -859,9 +883,11 @@ test "formatMineOutput - empty list" {
 test "formatTeamOutput - empty list" {
     var buf: [65536]u8 = undefined;
     var buffer = std.Io.Writer.fixed(&buf);
+    var env = std.process.Environ.Map.init(std.testing.allocator);
+    defer env.deinit();
 
     const prs: []const PullRequest = &[_]PullRequest{};
-    try formatTeamOutput(std.testing.allocator, &buffer, prs, 0, std.testing.io);
+    try formatTeamOutput(std.testing.allocator, &buffer, prs, 0, std.testing.io, &env);
 
     try std.testing.expectEqualStrings("No open PRs found\n", buffer.buffered());
 }
@@ -869,6 +895,8 @@ test "formatTeamOutput - empty list" {
 test "formatMineOutput - single PR" {
     var buf: [65536]u8 = undefined;
     var buffer = std.Io.Writer.fixed(&buf);
+    var env = std.process.Environ.Map.init(std.testing.allocator);
+    defer env.deinit();
 
     const prs = [_]PullRequest{
         .{
@@ -885,7 +913,7 @@ test "formatMineOutput - single PR" {
         },
     };
 
-    try formatMineOutput(std.testing.allocator, &buffer, &prs, 1000, std.testing.io);
+    try formatMineOutput(std.testing.allocator, &buffer, &prs, 1000, std.testing.io, &env);
 
     // Check that output contains expected elements
     try std.testing.expect(std.mem.indexOf(u8, buffer.buffered(), "k8s/kube#1234") != null);
@@ -898,6 +926,8 @@ test "formatMineOutput - single PR" {
 test "formatTeamOutput - single PR" {
     var buf: [65536]u8 = undefined;
     var buffer = std.Io.Writer.fixed(&buf);
+    var env = std.process.Environ.Map.init(std.testing.allocator);
+    defer env.deinit();
 
     const prs = [_]PullRequest{
         .{
@@ -914,7 +944,7 @@ test "formatTeamOutput - single PR" {
         },
     };
 
-    try formatTeamOutput(std.testing.allocator, &buffer, &prs, 1000, std.testing.io);
+    try formatTeamOutput(std.testing.allocator, &buffer, &prs, 1000, std.testing.io, &env);
 
     // Check that output contains expected elements
     try std.testing.expect(std.mem.indexOf(u8, buffer.buffered(), "alice") != null);
@@ -928,6 +958,8 @@ test "formatTeamOutput - single PR" {
 test "formatMineOutput - long identifiers not truncated" {
     var buf: [65536]u8 = undefined;
     var buffer = std.Io.Writer.fixed(&buf);
+    var env = std.process.Environ.Map.init(std.testing.allocator);
+    defer env.deinit();
 
     const prs = [_]PullRequest{
         .{
@@ -944,7 +976,7 @@ test "formatMineOutput - long identifiers not truncated" {
         },
     };
 
-    try formatMineOutput(std.testing.allocator, &buffer, &prs, 1000, std.testing.io);
+    try formatMineOutput(std.testing.allocator, &buffer, &prs, 1000, std.testing.io, &env);
 
     // Check that full identifier is present (not truncated)
     try std.testing.expect(std.mem.indexOf(u8, buffer.buffered(), "very-long-organization/very-long-repository#12345") != null);
@@ -1232,13 +1264,11 @@ test "formatMineRow - URL never truncated in two-line mode" {
 // Tests for header URL column in inline mode
 
 test "formatMineOutput - header includes URL column in inline mode" {
-    // Use a mock that forces inline mode by setting a very wide terminal
-    // We'll test this by checking the output contains "URL" in the header
-    // Since we can't control terminal width directly, we verify header format logic
     var buf: [65536]u8 = undefined;
     var buffer = std.Io.Writer.fixed(&buf);
+    var env = std.process.Environ.Map.init(std.testing.allocator);
+    defer env.deinit();
 
-    // Create PRs with short URLs that would fit inline on a wide terminal
     const prs = [_]PullRequest{
         .{
             .org = "org",
@@ -1254,7 +1284,7 @@ test "formatMineOutput - header includes URL column in inline mode" {
         },
     };
 
-    try formatMineOutput(std.testing.allocator, &buffer, &prs, 1000, std.testing.io);
+    try formatMineOutput(std.testing.allocator, &buffer, &prs, 1000, std.testing.io, &env);
 
     // Header should contain expected columns
     try std.testing.expect(std.mem.indexOf(u8, buffer.buffered(), "ORG/REPO#NUM") != null);
@@ -1268,6 +1298,8 @@ test "formatMineOutput - header includes URL column in inline mode" {
 test "formatTeamOutput - header includes URL column in inline mode" {
     var buf: [65536]u8 = undefined;
     var buffer = std.Io.Writer.fixed(&buf);
+    var env = std.process.Environ.Map.init(std.testing.allocator);
+    defer env.deinit();
 
     const prs = [_]PullRequest{
         .{
@@ -1284,7 +1316,7 @@ test "formatTeamOutput - header includes URL column in inline mode" {
         },
     };
 
-    try formatTeamOutput(std.testing.allocator, &buffer, &prs, 1000, std.testing.io);
+    try formatTeamOutput(std.testing.allocator, &buffer, &prs, 1000, std.testing.io, &env);
 
     // Header should contain expected columns
     try std.testing.expect(std.mem.indexOf(u8, buffer.buffered(), "AUTHOR") != null);
